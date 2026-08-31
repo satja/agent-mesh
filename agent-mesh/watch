@@ -1,0 +1,90 @@
+#!/usr/bin/env node
+
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+  unwatchFile,
+  watchFile,
+} from "node:fs";
+import { join, resolve } from "node:path";
+
+const projectRoot = resolve(process.env.AGENT_MESH_CWD || process.cwd());
+const stateDir = join(projectRoot, ".agent-mesh");
+const messageLog = join(stateDir, "messages.jsonl");
+const newOnly = process.argv.includes("--new");
+const once = process.argv.includes("--once");
+let offset = 0;
+let remainder = "";
+let reading = false;
+
+mkdirSync(stateDir, { recursive: true });
+if (!existsSync(messageLog)) appendFileSync(messageLog, "", { mode: 0o600 });
+if (newOnly) offset = statSync(messageLog).size;
+
+function render(line) {
+  if (!line.trim()) return;
+  try {
+    const record = JSON.parse(line);
+    const timestamp = String(record.created_at || "unknown time");
+    const sender = `${record.sender_id || "unknown"} (${record.sender_kind || "unknown"})`;
+    const recipient = `${record.recipient_id || "unknown"} (${record.recipient_kind || "unknown"})`;
+    const message = String(record.message || "");
+    process.stdout.write(
+      `\n[${timestamp}] ${sender} -> ${recipient}\n${message}\n${"-".repeat(72)}\n`,
+    );
+  } catch (error) {
+    process.stdout.write(`\n[invalid agent-mesh record] ${error.message}\n${line}\n`);
+  }
+}
+
+function drain() {
+  if (reading) return;
+  reading = true;
+  try {
+    const size = statSync(messageLog).size;
+    if (size < offset) {
+      offset = 0;
+      remainder = "";
+    }
+    if (size <= offset) return;
+    const length = size - offset;
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(messageLog, "r");
+    try {
+      readSync(fd, buffer, 0, length, offset);
+    } finally {
+      closeSync(fd);
+    }
+    offset = size;
+    const records = (remainder + buffer.toString("utf8")).split("\n");
+    remainder = records.pop() || "";
+    for (const record of records) render(record);
+  } finally {
+    reading = false;
+  }
+}
+
+process.stdout.write(
+  `Watching exact agent-to-agent messages in ${projectRoot}\n` +
+    (once
+      ? "Showing existing recorded messages once.\n"
+      : newOnly
+        ? "Showing new messages only.\n"
+        : "Showing existing history, then following new messages.\n") +
+    (once ? "" : "Press Ctrl-C to stop.\n"),
+);
+drain();
+if (once) process.exit(0);
+watchFile(messageLog, { interval: 150 }, drain);
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    unwatchFile(messageLog);
+    process.exit(0);
+  });
+}

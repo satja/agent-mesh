@@ -1,0 +1,19 @@
+{
+  "name": "agent-mesh",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-local addressed messaging between Codex and Claude Code sessions",
+  "main": "server.js",
+  "scripts": {
+    "test": "node test.js",
+    "status": "node status.js",
+    "watch": "node watch"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "description": "Register launcher-created Codex sessions with the project-local agent mesh.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./agent-mesh/session-hook.js",
+            "timeout": 5,
+            "statusMessage": "Registering Codex agent identity"
+          }
+        ]
+      }
+    ]
+  }
+}

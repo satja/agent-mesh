@@ -1,0 +1,19 @@
+# Runtime and local client state
+.agent-bridge/
+.agent-mesh/
+.codex/
+.mcp.json
+
+# Installed dependencies and diagnostics
+agent-mesh/node_modules/
+agent-mesh/agent-mesh.log
+
+# Superseded local prototype retained only in the development workspace
+codex-bridge/
+install-agent-bridge.mjs
+AGENT2AGENT_SETUP.md
+MULTI_CLAUDE_HUB_DESIGN.md
+
+# Platform/editor files
+.DS_Store
+*.swp

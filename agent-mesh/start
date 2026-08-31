@@ -1,0 +1,60 @@
+#!/usr/bin/env node
+
+import { spawnSync } from "node:child_process";
+
+const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+const kind = String(process.argv[2] || "").trim();
+const agentId = String(process.argv[3] || "").trim();
+
+if (!new Set(["codex", "claude"]).has(kind) || !ID_PATTERN.test(agentId)) {
+  process.stderr.write(
+    "Usage: ./agent-mesh/start <codex|claude> <agent-id> [agent options]\n" +
+      "Agent ID must match [a-z0-9][a-z0-9_-]{0,31}.\n",
+  );
+  process.exit(2);
+}
+
+const command =
+  kind === "codex"
+    ? process.env.AGENT_MESH_CODEX_BIN || "codex"
+    : process.env.AGENT_MESH_CLAUDE_BIN || "claude";
+const rawArgs = process.argv.slice(4);
+const noBootstrap = rawArgs.includes("--mesh-no-bootstrap");
+const userArgs = rawArgs.filter((argument) => argument !== "--mesh-no-bootstrap");
+const bootstrapPrompt =
+  process.env.AGENT_MESH_BOOTSTRAP_PROMPT ||
+  "Agent-mesh bootstrap: initialize this session, then reply READY to the human. Do not send a peer message.";
+const args =
+  kind === "codex"
+    ? ["--no-alt-screen", ...userArgs, ...(noBootstrap ? [] : [bootstrapPrompt])]
+    : [
+        "-n",
+        agentId,
+        "--dangerously-load-development-channels",
+        "server:agent-mesh",
+        ...userArgs,
+      ];
+
+if (kind === "codex") {
+  process.stdout.write(
+    `Starting Codex agent '${agentId}'.\n` +
+      (noBootstrap ? "Automatic bootstrap is disabled for this launch.\n" : "An initial bootstrap turn will run automatically.\n") +
+      `On the first launch, trust the project MCP server and SessionStart hook. If startup registration was skipped, run /clear ${agentId} and complete one turn, or relaunch.\n`,
+  );
+} else {
+  process.stdout.write(`Starting Claude Code agent '${agentId}'.\n`);
+}
+
+const result = spawnSync(command, args, {
+  stdio: "inherit",
+  env: {
+    ...process.env,
+    AGENT_MESH_ID: agentId,
+    AGENT_MESH_KIND: kind,
+  },
+});
+if (result.error) {
+  process.stderr.write(`Failed to launch ${command}: ${result.error.message}\n`);
+  process.exit(1);
+}
+process.exit(result.status ?? 1);
