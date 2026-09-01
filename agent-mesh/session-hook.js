@@ -48,9 +48,10 @@ function processAlive(pid) {
   }
 }
 
-// Codex forwards AGENT_MESH_* to the MCP server through config.toml env_vars,
-// but hook commands do not inherit them. The launcher therefore also records a
-// claim on disk, so identity survives an environment that reaches neither.
+// Codex normally does pass AGENT_MESH_* through to hook commands, but the hook
+// still gets no identity when it runs before the user has trusted it, or when
+// the session was started outside the launcher. The launcher therefore also
+// records a claim on disk so registration does not depend on the environment.
 function readClaims() {
   const directory = join(stateDir, "launch");
   if (!existsSync(directory)) return [];
@@ -145,6 +146,26 @@ try {
   const sessionDir = join(stateDir, "sessions");
   mkdirSync(sessionDir, { recursive: true });
   const target = join(sessionDir, `${identity.agentId}.json`);
+  // The MCP server usually connects before this hook runs and stamps the record
+  // with its pid. Overwriting blindly would erase the only liveness signal a
+  // Codex registration has, so carry a still-live stamp forward.
+  let carried = {};
+  try {
+    const existing = JSON.parse(readFileSync(target, "utf8"));
+    if (
+      existing.agent_id === identity.agentId &&
+      existing.kind === "codex" &&
+      Number.isInteger(existing.mcp_pid) &&
+      processAlive(existing.mcp_pid)
+    ) {
+      carried = {
+        mcp_pid: existing.mcp_pid,
+        mcp_started_at: existing.mcp_started_at,
+      };
+    }
+  } catch {
+    // No usable prior record; register from scratch.
+  }
   const temporary = `${target}.${process.pid}.tmp`;
   writeFileSync(
     temporary,
@@ -156,6 +177,7 @@ try {
         cwd: projectRoot,
         identity_source: identity.source,
         registered_at: new Date().toISOString(),
+        ...carried,
       },
       null,
       2,

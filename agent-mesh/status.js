@@ -1,9 +1,20 @@
 #!/usr/bin/env node
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const projectRoot = resolve(process.env.AGENT_MESH_CWD || process.cwd());
+// `npm --prefix agent-mesh run ...` runs with cwd set to the prefix directory,
+// not the project root, so cwd alone silently points at the wrong state dir.
+// This script always lives at <project>/agent-mesh/, which does not move.
+function resolveProjectRoot() {
+  if (process.env.AGENT_MESH_CWD) return resolve(process.env.AGENT_MESH_CWD);
+  const beside = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  if (existsSync(join(beside, ".agent-mesh"))) return beside;
+  return resolve(process.cwd());
+}
+
+const projectRoot = resolveProjectRoot();
 const sessionDir = join(projectRoot, ".agent-mesh", "sessions");
 
 if (!existsSync(sessionDir)) {

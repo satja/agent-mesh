@@ -46,12 +46,17 @@ Every Codex launcher invocation supplies a short bootstrap prompt automatically.
    - Run `/clear codex-a` (using that terminal's actual agent ID), then complete one ordinary turn; or
    - Exit and relaunch. The trusted startup hook and automatic bootstrap will then both run.
 
-Codex does not pass `AGENT_MESH_ID`/`AGENT_MESH_KIND` to hook commands, only to
-the MCP server. The launcher therefore also writes a claim under
-`.agent-mesh/launch/`, and the hook falls back to it, so registration does not
-depend on the hook inheriting an environment. Launching Codex directly rather
-than through `./agent-mesh/start` leaves no claim; register that session by
-relaunching through the launcher.
+The hook normally inherits `AGENT_MESH_ID`/`AGENT_MESH_KIND` from the launcher,
+but it gets neither when it runs before you have trusted it, or when the session
+was started outside the launcher. The launcher therefore also writes a claim
+under `.agent-mesh/launch/` that the hook falls back to, so registration does not
+depend on the environment. Launching Codex directly leaves no claim; register
+that session by relaunching through the launcher.
+
+A registration carries an `mcp_pid` stamped by that session's MCP server, which
+is what makes Codex liveness checkable. The hook preserves a live stamp when it
+rewrites a record, and the server retries stamping for about 90 seconds if it
+connects before the hook has written anything.
 
 Codex sessions launched after the hook is trusted need neither `/clear` nor a manual bootstrap. Claude registers itself when its MCP/channel server starts.
 

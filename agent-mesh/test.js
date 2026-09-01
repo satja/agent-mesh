@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -18,6 +19,7 @@ const project = mkdtempSync(join(tmpdir(), "agent-mesh-test-"));
 const hook = join(here, "session-hook.js");
 const serverPath = join(here, "server.js");
 const startPath = join(here, "start");
+const statusPath = join(here, "status.js");
 const watchPath = join(here, "watch");
 const queueLog = join(project, "queue.jsonl");
 const messageLog = join(project, ".agent-mesh", "messages.jsonl");
@@ -480,6 +482,57 @@ try {
     `identity failure was not explained: ${orphan.stderr}`,
   );
   pass("Server without a mesh identity explains the failed handshake");
+
+  // `npm --prefix agent-mesh run status` runs with cwd set to the prefix dir,
+  // so cwd alone made status silently report an empty mesh.
+  const installedDir = join(project, "agent-mesh");
+  mkdirSync(installedDir, { recursive: true });
+  copyFileSync(statusPath, join(installedDir, "status.js"));
+  const fromPrefix = spawnSync(process.execPath, ["status.js"], {
+    cwd: installedDir,
+    encoding: "utf8",
+    env: (() => {
+      const clean = { ...process.env };
+      delete clean.AGENT_MESH_CWD;
+      return clean;
+    })(),
+  });
+  assert(
+    fromPrefix.stdout.includes("codex-a") && fromPrefix.stdout.includes("claude-a"),
+    `status did not resolve the project root from its own location: ${fromPrefix.stdout}`,
+  );
+  pass("Status resolves the project root when cwd is the install directory");
+
+  // The MCP server normally stamps liveness before the hook writes the record.
+  const stamped = join(project, ".agent-mesh", "sessions", "codex-stamped.json");
+  writeFileSync(
+    stamped,
+    JSON.stringify({
+      agent_id: "codex-stamped",
+      kind: "codex",
+      session_id: "session-old",
+      cwd: project,
+      mcp_pid: process.pid,
+      mcp_started_at: "2026-01-01T00:00:00.000Z",
+      registered_at: "2026-01-01T00:00:00.000Z",
+    }),
+  );
+  registerCodex("codex-stamped", "session-new");
+  const merged = sessionRecord("codex-stamped");
+  assert(
+    merged.session_id === "session-new" && merged.mcp_pid === process.pid,
+    `hook clobbered a live MCP stamp: ${JSON.stringify(merged)}`,
+  );
+  pass("SessionStart preserves a live MCP liveness stamp");
+
+  const mistyped = spawnSync(process.execPath, [startPath, "codex", "resume", "--last"], {
+    cwd: project,
+    encoding: "utf8",
+    env: { ...process.env, AGENT_MESH_CODEX_BIN: fakeLauncherCodex },
+  });
+  assert(mistyped.status === 2, "a mistyped resume was accepted as an agent ID");
+  assert(/--resume/.test(mistyped.stderr), "reserved-ID error did not suggest the flag");
+  pass("Reserved words are rejected as agent IDs");
 
   clearTimeout(timeout);
   cleanup();

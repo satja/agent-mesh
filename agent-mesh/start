@@ -5,11 +5,22 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// These are all valid IDs, but as the <agent-id> argument they almost always
+// mean the resume flag was mistyped, which would register a bogus agent.
+const RESERVED_IDS = new Set(["resume", "continue", "last", "start", "status", "watch"]);
 // `codex queue`, the transport used to deliver messages to a Codex recipient,
 // was introduced in Codex CLI 0.149.0.
 const MIN_CODEX_VERSION = "0.149.0";
 const kind = String(process.argv[2] || "").trim();
 const agentId = String(process.argv[3] || "").trim();
+
+if (RESERVED_IDS.has(agentId)) {
+  process.stderr.write(
+    `'${agentId}' is not usable as an agent ID.\n` +
+      `Did you mean: ./agent-mesh/start ${kind || "<codex|claude>"} <agent-id> --${agentId}\n`,
+  );
+  process.exit(2);
+}
 
 if (!new Set(["codex", "claude"]).has(kind) || !ID_PATTERN.test(agentId)) {
   process.stderr.write(
@@ -88,8 +99,9 @@ function warnOnOldCodex() {
   );
 }
 
-// Codex forwards AGENT_MESH_* to the MCP server via config.toml env_vars, but
-// not to SessionStart hook commands. Record a claim the hook can read instead.
+// Record a claim the SessionStart hook can read, so identity survives a hook
+// invocation that inherits no environment (untrusted on first launch, or a
+// session started outside this launcher).
 let claimPath = null;
 if (kind === "codex") {
   warnOnOldCodex();

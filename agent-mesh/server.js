@@ -119,6 +119,10 @@ function writeRegistration(record) {
   renameSync(temporary, target);
 }
 
+const STAMP_RETRY_MS = 2000;
+const MAX_STAMP_ATTEMPTS = 45;
+let stampAttempts = 0;
+
 function registerSelf() {
   if (selfKind === "claude") {
     writeRegistration({
@@ -135,6 +139,13 @@ function registerSelf() {
   // with the session, which is what makes Codex liveness checkable at all.
   const target = join(SESSION_DIR, `${selfId}.json`);
   if (!existsSync(target)) {
+    // The SessionStart hook often lands seconds after this server connects, so
+    // a missing record is not yet a failure. Keep trying, then say so.
+    if (stampAttempts < MAX_STAMP_ATTEMPTS) {
+      stampAttempts += 1;
+      setTimeout(registerSelf, STAMP_RETRY_MS).unref();
+      return;
+    }
     log("warn", "Codex session is not registered; the SessionStart hook did not run", {
       expected: target,
       consequence: `messages addressed to '${selfId}' cannot be delivered`,
