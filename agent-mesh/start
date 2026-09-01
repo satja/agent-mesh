@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -72,6 +72,33 @@ const args =
         ...(resuming ? ["--resume", ...resumeArgs] : []),
       ];
 
+// This bundle also ships inside the mesh source repo, which has its own
+// agent-mesh/ subdirectory. Running the launcher from there starts an agent in a
+// project with no mesh configuration, and the agent reports only
+// "no MCP server configured with that name".
+function requireInstalledProject() {
+  const marker =
+    kind === "codex"
+      ? { path: join(projectRoot, ".codex", "config.toml"), label: ".codex/config.toml" }
+      : { path: join(projectRoot, ".mcp.json"), label: ".mcp.json" };
+  let configured = false;
+  try {
+    configured =
+      existsSync(marker.path) && readFileSync(marker.path, "utf8").includes("agent-mesh");
+  } catch {
+    configured = false;
+  }
+  if (configured) return;
+  process.stderr.write(
+    `No agent-mesh ${marker.label} in ${projectRoot}\n` +
+      "so this agent would start with no mesh and report\n" +
+      '"no MCP server configured with that name".\n' +
+      "Run the launcher from the project you installed the mesh into, or install it:\n" +
+      "  node /path/to/agent-mesh/install-agent-mesh.mjs\n",
+  );
+  process.exit(2);
+}
+
 function parseVersion(text) {
   const match = String(text || "").match(/(\d+)\.(\d+)\.(\d+)/);
   return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
@@ -103,6 +130,8 @@ function warnOnOldCodex() {
 // invocation that inherits no environment (untrusted on first launch, or a
 // session started outside this launcher).
 let claimPath = null;
+requireInstalledProject();
+
 if (kind === "codex") {
   warnOnOldCodex();
   const launchDir = join(projectRoot, ".agent-mesh", "launch");

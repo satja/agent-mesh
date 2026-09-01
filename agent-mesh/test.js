@@ -221,6 +221,12 @@ const timeout = setTimeout(() => {
 
 try {
   mkdirSync(join(project, ".agent-mesh"), { recursive: true });
+  mkdirSync(join(project, ".codex"), { recursive: true });
+  writeFileSync(
+    join(project, ".mcp.json"),
+    JSON.stringify({ mcpServers: { "agent-mesh": { command: "node" } } }),
+  );
+  writeFileSync(join(project, ".codex", "config.toml"), "[mcp_servers.agent-mesh]\n");
   const launch = spawnSync(process.execPath, [startPath, "codex", "codex-launch"], {
     cwd: project,
     encoding: "utf8",
@@ -533,6 +539,20 @@ try {
   assert(mistyped.status === 2, "a mistyped resume was accepted as an agent ID");
   assert(/--resume/.test(mistyped.stderr), "reserved-ID error did not suggest the flag");
   pass("Reserved words are rejected as agent IDs");
+
+  const uninstalled = mkdtempSync(join(tmpdir(), "agent-mesh-bare-"));
+  const strayLaunch = spawnSync(process.execPath, [startPath, "claude", "claude-stray"], {
+    cwd: uninstalled,
+    encoding: "utf8",
+    env: { ...process.env, AGENT_MESH_CLAUDE_BIN: fakeClaude },
+  });
+  rmSync(uninstalled, { recursive: true, force: true });
+  assert(strayLaunch.status === 2, "launching outside an installed project was allowed");
+  assert(
+    /no MCP server configured with that name/.test(strayLaunch.stderr),
+    `stray launch did not name the symptom: ${strayLaunch.stderr}`,
+  );
+  pass("Launching outside an installed project fails with the symptom named");
 
   clearTimeout(timeout);
   cleanup();
