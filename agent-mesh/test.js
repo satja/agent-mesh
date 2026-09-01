@@ -41,6 +41,37 @@ writeFileSync(
     "fs.writeFileSync(process.env.AGENT_MESH_TEST_LAUNCH_LOG, JSON.stringify({args: process.argv.slice(2), id: process.env.AGENT_MESH_ID, kind: process.env.AGENT_MESH_KIND}));\n",
 );
 chmodSync(fakeLauncherCodex, 0o755);
+const fakeOldCodex = join(project, "fake-old-codex");
+writeFileSync(
+  fakeOldCodex,
+  "#!/usr/bin/env node\n" +
+    "if (process.argv[2] === '--version') { process.stdout.write('codex-cli 0.144.4\\n'); process.exit(0); }\n" +
+    "process.stderr.write(\"error: unexpected argument '--thread' found\\n\\nUsage: codex [OPTIONS] [PROMPT]\\n\");\n" +
+    "process.exit(2);\n",
+);
+chmodSync(fakeOldCodex, 0o755);
+const fakeClaude = join(project, "fake-claude");
+writeFileSync(
+  fakeClaude,
+  "#!/usr/bin/env node\n" +
+    "const fs = require('node:fs');\n" +
+    "fs.writeFileSync(process.env.AGENT_MESH_TEST_LAUNCH_LOG, JSON.stringify({args: process.argv.slice(2)}));\n",
+);
+chmodSync(fakeClaude, 0o755);
+
+function launchArgs(agentKind, agentId, extraArgs, bin) {
+  const result = spawnSync(process.execPath, [startPath, agentKind, agentId, ...extraArgs], {
+    cwd: project,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      [agentKind === "codex" ? "AGENT_MESH_CODEX_BIN" : "AGENT_MESH_CLAUDE_BIN"]: bin,
+      AGENT_MESH_TEST_LAUNCH_LOG: launchLog,
+    },
+  });
+  assert(result.status === 0, result.stderr || "launcher failed");
+  return JSON.parse(readFileSync(launchLog, "utf8")).args;
+}
 
 function registerCodex(agentId, sessionId) {
   const result = spawnSync(process.execPath, [hook], {
@@ -59,8 +90,29 @@ function registerCodex(agentId, sessionId) {
   if (result.status !== 0) throw new Error(result.stderr || "registration hook failed");
 }
 
+function registerCodexWithoutEnv(sessionId) {
+  const env = { ...process.env };
+  delete env.AGENT_MESH_ID;
+  delete env.AGENT_MESH_KIND;
+  return spawnSync(process.execPath, [hook], {
+    input: JSON.stringify({
+      hook_event_name: "SessionStart",
+      session_id: sessionId,
+      cwd: project,
+    }),
+    encoding: "utf8",
+    env,
+  });
+}
+
+function sessionRecord(agentId) {
+  return JSON.parse(
+    readFileSync(join(project, ".agent-mesh", "sessions", `${agentId}.json`), "utf8"),
+  );
+}
+
 class McpProcess {
-  constructor(agentId, kind) {
+  constructor(agentId, kind, extraEnv = {}) {
     this.nextId = 1;
     this.pending = new Map();
     this.notifications = [];
@@ -74,6 +126,7 @@ class McpProcess {
         AGENT_MESH_CWD: project,
         AGENT_MESH_CODEX_BIN: fakeCodex,
         AGENT_MESH_TEST_QUEUE_LOG: queueLog,
+        ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -308,6 +361,125 @@ try {
   pass("Codex -> Claude through addressed channel notification");
   pass("Claude -> Claude through addressed channel notification");
   pass("Recipient filtering and structural sender attribution");
+
+  // Codex does not forward AGENT_MESH_* to hook commands, so identity must also
+  // be recoverable from the launcher's on-disk claim.
+  const launchDir = join(project, ".agent-mesh", "launch");
+  mkdirSync(launchDir, { recursive: true });
+  writeFileSync(
+    join(launchDir, "codex-claimed.json"),
+    JSON.stringify({
+      agent_id: "codex-claimed",
+      kind: "codex",
+      launcher_pid: process.pid,
+      created_at: new Date().toISOString(),
+    }),
+  );
+  const claimed = registerCodexWithoutEnv("session-claimed");
+  assert(claimed.status === 0, claimed.stderr || "claim-based registration failed");
+  assert(
+    sessionRecord("codex-claimed").identity_source === "launch-claim",
+    "registration did not fall back to the launcher claim",
+  );
+  pass("Codex registers from a launch claim with no inherited environment");
+
+  rmSync(launchDir, { recursive: true, force: true });
+  const beforeBail = readFileSync(join(project, ".agent-mesh", "agent-mesh.log"), "utf8").length;
+  const bailed = registerCodexWithoutEnv("session-unclaimed");
+  assert(bailed.status === 0, "a non-mesh Codex session must not fail its SessionStart");
+  const bailLog = readFileSync(join(project, ".agent-mesh", "agent-mesh.log"), "utf8")
+    .slice(beforeBail)
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert(
+    bailLog.some(
+      (entry) => entry.source === "session-hook" && /no mesh identity/.test(entry.message),
+    ),
+    "an unidentified SessionStart bailed without leaving a diagnostic",
+  );
+  pass("Unidentified SessionStart bails quietly but leaves a log entry");
+
+  // A Codex record whose MCP server has exited must not keep absorbing messages.
+  const dead = spawnSync(process.execPath, ["-e", ""]);
+  writeFileSync(
+    join(project, ".agent-mesh", "sessions", "codex-dead.json"),
+    JSON.stringify({
+      agent_id: "codex-dead",
+      kind: "codex",
+      session_id: "session-dead",
+      cwd: project,
+      mcp_pid: dead.pid,
+      registered_at: new Date().toISOString(),
+    }),
+  );
+  const afterDeath = JSON.parse((await codexA.call("list_peers", {})).content[0].text);
+  assert(
+    !afterDeath.peers.some((peer) => peer.agent_id === "codex-dead"),
+    "a Codex registration with a dead MCP pid was still listed",
+  );
+  assert(
+    afterDeath.peers.some((peer) => peer.agent_id === "codex-b"),
+    "liveness filtering removed a healthy Codex peer",
+  );
+  pass("Stale Codex registrations are filtered by MCP liveness");
+
+  // An older Codex has no `queue` subcommand; the raw clap usage error alone
+  // gives the operator nothing to act on.
+  const legacy = new McpProcess("claude-legacy", "claude", {
+    AGENT_MESH_CODEX_BIN: fakeOldCodex,
+  });
+  await legacy.initialize();
+  let queueFailure = "";
+  try {
+    const attempt = await legacy.call("send_peer", {
+      recipient: "codex-b",
+      message: "should not deliver",
+    });
+    queueFailure = JSON.stringify(attempt);
+  } catch (error) {
+    queueFailure = error.message;
+  }
+  assert(
+    queueFailure.includes("0.149.0") && queueFailure.includes("0.144.4"),
+    `unsupported codex queue was not diagnosed: ${queueFailure}`,
+  );
+  pass("Unsupported codex queue reports the required and detected versions");
+
+  // Resuming outside the launcher loses AGENT_MESH_*, so the launcher has to own
+  // resume for both agents: Codex takes a subcommand, Claude takes a flag.
+  const codexResume = launchArgs("codex", "codex-resume", ["--resume", "--last"], fakeLauncherCodex);
+  assert(
+    codexResume[0] === "--no-alt-screen" &&
+      codexResume[1] === "resume" &&
+      codexResume[2] === "--last",
+    `codex resume args wrong: ${JSON.stringify(codexResume)}`,
+  );
+  assert(
+    !codexResume.some((argument) => argument.startsWith("Agent-mesh bootstrap:")),
+    "a resumed Codex session was given a bootstrap turn",
+  );
+  const claudeResume = launchArgs("claude", "claude-resume", ["--resume", "abc123"], fakeClaude);
+  assert(
+    claudeResume.includes("--resume") &&
+      claudeResume[claudeResume.indexOf("--resume") + 1] === "abc123" &&
+      claudeResume.includes("server:agent-mesh"),
+    `claude resume args wrong: ${JSON.stringify(claudeResume)}`,
+  );
+  pass("Launcher owns resume for both agents and skips the bootstrap turn");
+
+  const orphan = spawnSync(process.execPath, [serverPath], {
+    cwd: project,
+    encoding: "utf8",
+    env: { ...process.env, AGENT_MESH_CWD: project, AGENT_MESH_ID: "", AGENT_MESH_KIND: "" },
+  });
+  assert(orphan.status === 1, "server without an identity should exit non-zero");
+  assert(
+    /AGENT_MESH_ID/.test(orphan.stderr) && /--resume/.test(orphan.stderr),
+    `identity failure was not explained: ${orphan.stderr}`,
+  );
+  pass("Server without a mesh identity explains the failed handshake");
 
   clearTimeout(timeout);
   cleanup();

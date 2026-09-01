@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -32,6 +32,8 @@ const MESSAGE_LOG = join(STATE_DIR, "messages.jsonl");
 const LOG = join(STATE_DIR, "agent-mesh.log");
 const CODEX_BIN = process.env.AGENT_MESH_CODEX_BIN || "codex";
 const MAX_MESSAGE = 24000;
+// `codex queue` is the Codex-recipient transport; it landed in Codex CLI 0.149.0.
+const MIN_CODEX_VERSION = "0.149.0";
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 function validateId(value, label = "agent ID") {
@@ -48,8 +50,44 @@ function validateKind(value) {
   return kind;
 }
 
-const selfId = validateId(process.env.AGENT_MESH_ID);
-const selfKind = validateKind(process.env.AGENT_MESH_KIND);
+// Without an identity this server cannot register, address, or filter anything.
+// Exiting here surfaces to the agent only as a failed MCP handshake, so say why
+// on stderr and in the log before going.
+function requireIdentity() {
+  try {
+    return {
+      id: validateId(process.env.AGENT_MESH_ID),
+      kind: validateKind(process.env.AGENT_MESH_KIND),
+    };
+  } catch (error) {
+    const explanation =
+      "agent-mesh: AGENT_MESH_ID/AGENT_MESH_KIND are unset or invalid, so this MCP\n" +
+      "server cannot start and the agent will report a failed MCP handshake.\n" +
+      "Start and resume sessions through the launcher, which sets both:\n" +
+      "  ./agent-mesh/start codex <agent-id> --resume\n" +
+      "  ./agent-mesh/start claude <agent-id> --resume\n" +
+      `Detail: ${error.message}\n`;
+    process.stderr.write(explanation);
+    try {
+      mkdirSync(STATE_DIR, { recursive: true });
+      appendFileSync(
+        LOG,
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          message: "MCP server refused to start without a mesh identity",
+          extra: { detail: error.message, pid: process.pid },
+        }) + "\n",
+        { mode: 0o600 },
+      );
+    } catch {
+      // Diagnostics must never mask the original failure.
+    }
+    process.exit(1);
+  }
+}
+
+const { id: selfId, kind: selfKind } = requireIdentity();
 
 function log(level, message, extra) {
   try {
@@ -81,15 +119,40 @@ function writeRegistration(record) {
   renameSync(temporary, target);
 }
 
-function registerClaude() {
-  if (selfKind !== "claude") return;
-  writeRegistration({
-    agent_id: selfId,
-    kind: "claude",
-    pid: process.pid,
-    cwd: PROJECT_ROOT,
-    registered_at: new Date().toISOString(),
-  });
+function registerSelf() {
+  if (selfKind === "claude") {
+    writeRegistration({
+      agent_id: selfId,
+      kind: "claude",
+      pid: process.pid,
+      cwd: PROJECT_ROOT,
+      registered_at: new Date().toISOString(),
+    });
+    return;
+  }
+  // A Codex session_id is only visible to the SessionStart hook, so this server
+  // cannot create its own record. It can stamp the record with a pid that dies
+  // with the session, which is what makes Codex liveness checkable at all.
+  const target = join(SESSION_DIR, `${selfId}.json`);
+  if (!existsSync(target)) {
+    log("warn", "Codex session is not registered; the SessionStart hook did not run", {
+      expected: target,
+      consequence: `messages addressed to '${selfId}' cannot be delivered`,
+      remedy: "relaunch through ./agent-mesh/start, or run /clear and complete one turn",
+    });
+    return;
+  }
+  try {
+    const record = JSON.parse(readFileSync(target, "utf8"));
+    if (record.agent_id !== selfId || record.kind !== "codex") return;
+    writeRegistration({
+      ...record,
+      mcp_pid: process.pid,
+      mcp_started_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    log("error", "could not stamp Codex registration", String(error));
+  }
 }
 
 function readPeers() {
@@ -104,9 +167,12 @@ function readPeers() {
       if (resolve(record.cwd || PROJECT_ROOT) !== PROJECT_ROOT) continue;
       if (kind === "codex" && !String(record.session_id || "").trim()) continue;
       if (kind === "claude" && !Number.isInteger(record.pid)) continue;
-      if (kind === "claude") {
+      // A Codex record predating mcp_pid stamping stays trusted; one whose
+      // server has exited is stale and must not absorb messages.
+      const livenessPid = kind === "claude" ? record.pid : record.mcp_pid;
+      if (Number.isInteger(livenessPid)) {
         try {
-          process.kill(record.pid, 0);
+          process.kill(livenessPid, 0);
         } catch (error) {
           if (error?.code === "ESRCH") continue;
           if (error?.code !== "EPERM") throw error;
@@ -161,6 +227,29 @@ function envelope(message) {
   return `[From ${selfKind} agent: ${selfId} via agent-mesh]\n\n${message}`;
 }
 
+function codexVersion() {
+  try {
+    const probe = spawnSync(CODEX_BIN, ["--version"], { encoding: "utf8" });
+    return String(probe.stdout || probe.stderr || "").trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+// A Codex older than MIN_CODEX_VERSION has no `queue` subcommand at all, so the
+// CLI reports a bare usage error that says nothing about the real cause.
+function describeQueueFailure(error, stderr) {
+  const detail = String(stderr || "").trim() || String(error);
+  if (/unexpected argument|unrecognized subcommand|Usage: codex/i.test(detail)) {
+    return (
+      `codex queue is unavailable (found ${codexVersion()}; requires ` +
+      `${MIN_CODEX_VERSION} or newer). Run 'codex update', then relaunch. ` +
+      `Original error: ${detail}`
+    );
+  }
+  return detail;
+}
+
 function queueToCodex(target, message) {
   return new Promise((resolveQueue, rejectQueue) => {
     execFile(
@@ -179,7 +268,7 @@ function queueToCodex(target, message) {
             error: String(error),
             stderr,
           });
-          rejectQueue(new Error(stderr?.trim() || String(error)));
+          rejectQueue(new Error(describeQueueFailure(error, stderr)));
           return;
         }
         const output = String(stdout || "").trim() || "queued";
@@ -435,6 +524,6 @@ const watcher = new ClaudeMailboxWatcher((content, meta) => {
     .catch((error) => log("error", "Claude channel push failed", String(error)));
 });
 watcher.start();
-// Publish a Claude identity only after its inbound watcher is ready, so another
-// agent cannot discover the recipient during a startup delivery gap.
-registerClaude();
+// Publish this agent's identity only after any inbound watcher is ready, so
+// another agent cannot discover the recipient during a startup delivery gap.
+registerSelf();

@@ -18,6 +18,8 @@ const skipNpm = process.argv.includes("--skip-npm");
 const sectionName = "agent-mesh-routing";
 const legacySectionName = "agent-bridge-routing";
 const hookCommand = "node ./agent-mesh/session-hook.js";
+// Delivery to a Codex recipient shells out to `codex queue`, added in 0.149.0.
+const minCodexVersion = "0.149.0";
 const legacyHookCommands = new Set([
   "node ./codex-bridge/codex-hook.js",
   "node ./codex-peer/session-hook.js",
@@ -39,6 +41,32 @@ This project can run multiple Codex and Claude Code sessions through the local \
 - End an exchange when the task converges, an explicit limit is reached, or human input is genuinely required. Avoid acknowledgment-only loops.
 - If a material disagreement remains, present the competing views and tradeoffs to the human, who has final authority.
 - Do not relay secrets or large tool output unless the task requires it.`;
+
+function parseVersion(text) {
+  const match = String(text || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function warnOnOldCodex() {
+  const probe = spawnSync(process.env.AGENT_MESH_CODEX_BIN || "codex", ["--version"], {
+    encoding: "utf8",
+  });
+  if (probe.error || probe.status !== 0) return;
+  const reported = String(probe.stdout || probe.stderr || "").trim();
+  const found = parseVersion(reported);
+  const required = parseVersion(minCodexVersion);
+  if (!found || !required) return;
+  for (let index = 0; index < 3; index += 1) {
+    if (found[index] === required[index]) continue;
+    if (found[index] > required[index]) return;
+    process.stderr.write(
+      `\nWARNING: ${reported} predates Codex CLI ${minCodexVersion}, which introduced\n` +
+        "`codex queue`. Messages addressed TO a Codex agent will fail to deliver\n" +
+        "until Codex is updated (`codex update`). Outbound messages still work.\n\n",
+    );
+    return;
+  }
+}
 
 function fail(message) {
   process.stderr.write(`agent mesh installer: ${message}\n`);
@@ -213,6 +241,8 @@ ensureTomlSection(join(targetRoot, ".codex/config.toml"), toml);
 ensureMarkdownSection(join(targetRoot, "AGENTS.md"), sectionName, sharedInstructions);
 ensureMarkdownSection(join(targetRoot, "CLAUDE.md"), sectionName, sharedInstructions);
 
+warnOnOldCodex();
+
 if (!skipNpm) {
   run("npm", ["--prefix", "agent-mesh", "ci"]);
   run("npm", ["--prefix", "agent-mesh", "test"]);
@@ -237,6 +267,9 @@ either run /clear <that-agent-id> and complete one turn, or exit and relaunch.
 
 Check registrations with:
   npm --prefix agent-mesh run status
+
+Each row ends with a liveness verdict. An agent missing from that list never ran
+its SessionStart hook; see .agent-mesh/agent-mesh.log for "session-hook" entries.
 
 In one optional monitor terminal, show every exact transported peer message:
   ./agent-mesh/watch

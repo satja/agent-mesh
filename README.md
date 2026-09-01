@@ -29,6 +29,19 @@ Launch any combination of agents:
 ./agent-mesh/start claude claude-b
 ```
 
+Resume an existing session through the launcher, never directly:
+
+```sh
+./agent-mesh/start codex codex-a --resume          # picker
+./agent-mesh/start codex codex-a --resume --last   # most recent
+./agent-mesh/start claude claude-a --resume        # picker
+./agent-mesh/start claude claude-a --resume <id>   # by session id
+```
+
+Running `codex resume` or `claude --resume` directly starts the session without
+`AGENT_MESH_ID`/`AGENT_MESH_KIND`, so its MCP server refuses to start and the
+agent reports a failed MCP handshake.
+
 Watch every exact agent-to-agent message in one additional terminal:
 
 ```sh
@@ -41,7 +54,10 @@ See [AGENT_MESH_SETUP.md](./AGENT_MESH_SETUP.md) for the complete setup, trust, 
 
 - Node.js 20 or newer
 - npm
-- Codex CLI for Codex sessions
+- Codex CLI **0.149.0 or newer** for Codex sessions. Delivery to a Codex
+  recipient uses `codex queue`, which earlier versions do not provide; on an
+  older CLI a Codex agent can still send, but messages addressed to it fail.
+  The launcher warns at startup and `send_peer` reports the detected version.
 - Claude Code for Claude sessions
 
 The installer is project-local and non-destructive: it merges managed configuration sections and preserves unrelated project configuration. Recognized legacy `codex-bridge` configuration is deactivated but not deleted.

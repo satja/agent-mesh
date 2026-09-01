@@ -46,7 +46,33 @@ Every Codex launcher invocation supplies a short bootstrap prompt automatically.
    - Run `/clear codex-a` (using that terminal's actual agent ID), then complete one ordinary turn; or
    - Exit and relaunch. The trusted startup hook and automatic bootstrap will then both run.
 
+Codex does not pass `AGENT_MESH_ID`/`AGENT_MESH_KIND` to hook commands, only to
+the MCP server. The launcher therefore also writes a claim under
+`.agent-mesh/launch/`, and the hook falls back to it, so registration does not
+depend on the hook inheriting an environment. Launching Codex directly rather
+than through `./agent-mesh/start` leaves no claim; register that session by
+relaunching through the launcher.
+
 Codex sessions launched after the hook is trusted need neither `/clear` nor a manual bootstrap. Claude registers itself when its MCP/channel server starts.
+
+### Resuming a session
+
+Resume through the launcher so the session keeps its mesh identity:
+
+```sh
+./agent-mesh/start codex codex-a --resume          # picker
+./agent-mesh/start codex codex-a --resume --last   # most recent
+./agent-mesh/start claude claude-a --resume        # picker
+./agent-mesh/start claude claude-a --resume <id>   # by session id
+```
+
+Everything after `--resume` is handed to the agent's own resume interface. A
+resumed session gets no bootstrap turn.
+
+`codex resume` or `claude --resume` run directly inherit no `AGENT_MESH_ID` or
+`AGENT_MESH_KIND`, so the MCP server exits at startup and Codex reports
+`MCP startup failed handshaking, connection closed: initialize response`. The
+server writes the reason to stderr and to `.agent-mesh/agent-mesh.log`.
 
 To disable the automatic prompt—for example, when supplying your own initial Codex prompt—use:
 
@@ -59,6 +85,15 @@ Check what is registered:
 ```sh
 npm --prefix agent-mesh run status
 ```
+
+Each row ends with a liveness verdict. `live` is healthy. `unconfirmed` on a
+Codex row means the session registered but its MCP server never connected.
+`STALE` means the process behind the registration is gone. An agent that is
+**missing entirely** never ran its `SessionStart` hook at all — the symptom is
+one-directional traffic, because an unregistered agent can still read its peers'
+registrations and send to them while nothing can address it. Look for
+`"source":"session-hook"` entries in `.agent-mesh/agent-mesh.log` to see whether
+the hook ran and why it declined to register.
 
 ## Use it
 

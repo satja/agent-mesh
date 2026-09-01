@@ -1,19 +1,28 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// `codex queue`, the transport used to deliver messages to a Codex recipient,
+// was introduced in Codex CLI 0.149.0.
+const MIN_CODEX_VERSION = "0.149.0";
 const kind = String(process.argv[2] || "").trim();
 const agentId = String(process.argv[3] || "").trim();
 
 if (!new Set(["codex", "claude"]).has(kind) || !ID_PATTERN.test(agentId)) {
   process.stderr.write(
     "Usage: ./agent-mesh/start <codex|claude> <agent-id> [agent options]\n" +
-      "Agent ID must match [a-z0-9][a-z0-9_-]{0,31}.\n",
+      "       ./agent-mesh/start <codex|claude> <agent-id> --resume [session]\n" +
+      "Agent ID must match [a-z0-9][a-z0-9_-]{0,31}.\n" +
+      "Always resume through this launcher; resuming an agent directly starts it\n" +
+      "without AGENT_MESH_ID/AGENT_MESH_KIND and its MCP server will refuse to run.\n",
   );
   process.exit(2);
 }
 
+const projectRoot = resolve(process.env.AGENT_MESH_CWD || process.cwd());
 const command =
   kind === "codex"
     ? process.env.AGENT_MESH_CODEX_BIN || "codex"
@@ -21,28 +30,104 @@ const command =
 const rawArgs = process.argv.slice(4);
 const noBootstrap = rawArgs.includes("--mesh-no-bootstrap");
 const userArgs = rawArgs.filter((argument) => argument !== "--mesh-no-bootstrap");
+// Everything after --resume belongs to the agent's own resume interface, so
+// `--resume` alone opens each agent's picker and `--resume <id>` targets one.
+const resumeAt = userArgs.indexOf("--resume");
+const globalArgs = resumeAt === -1 ? userArgs : userArgs.slice(0, resumeAt);
+const resumeArgs = resumeAt === -1 ? null : userArgs.slice(resumeAt + 1);
+const resuming = resumeArgs !== null;
 const bootstrapPrompt =
   process.env.AGENT_MESH_BOOTSTRAP_PROMPT ||
   "Agent-mesh bootstrap: initialize this session, then reply READY to the human. Do not send a peer message.";
+// Codex takes resume as a subcommand after its global options; Claude takes it
+// as a flag. A resumed session never gets a bootstrap turn.
 const args =
   kind === "codex"
-    ? ["--no-alt-screen", ...userArgs, ...(noBootstrap ? [] : [bootstrapPrompt])]
+    ? [
+        "--no-alt-screen",
+        ...globalArgs,
+        ...(resuming
+          ? ["resume", ...resumeArgs]
+          : noBootstrap
+            ? []
+            : [bootstrapPrompt]),
+      ]
     : [
         "-n",
         agentId,
         "--dangerously-load-development-channels",
         "server:agent-mesh",
-        ...userArgs,
+        ...globalArgs,
+        ...(resuming ? ["--resume", ...resumeArgs] : []),
       ];
+
+function parseVersion(text) {
+  const match = String(text || "").match(/(\d+)\.(\d+)\.(\d+)/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isBelowMinimum(reported, minimum) {
+  const found = parseVersion(reported);
+  const required = parseVersion(minimum);
+  if (!found || !required) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (found[index] !== required[index]) return found[index] < required[index];
+  }
+  return false;
+}
+
+function warnOnOldCodex() {
+  const probe = spawnSync(command, ["--version"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) return;
+  const reported = String(probe.stdout || probe.stderr || "").trim();
+  if (!isBelowMinimum(reported, MIN_CODEX_VERSION)) return;
+  process.stderr.write(
+    `\nWARNING: ${reported} predates Codex CLI ${MIN_CODEX_VERSION}, which introduced\n` +
+      "`codex queue`. Messages addressed TO this agent will fail to deliver until\n" +
+      "Codex is updated (`codex update`). Outbound messages still work.\n\n",
+  );
+}
+
+// Codex forwards AGENT_MESH_* to the MCP server via config.toml env_vars, but
+// not to SessionStart hook commands. Record a claim the hook can read instead.
+let claimPath = null;
+if (kind === "codex") {
+  warnOnOldCodex();
+  const launchDir = join(projectRoot, ".agent-mesh", "launch");
+  mkdirSync(launchDir, { recursive: true });
+  claimPath = join(launchDir, `${agentId}.json`);
+  writeFileSync(
+    claimPath,
+    JSON.stringify(
+      {
+        agent_id: agentId,
+        kind,
+        launcher_pid: process.pid,
+        created_at: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + "\n",
+    { mode: 0o600 },
+  );
+}
 
 if (kind === "codex") {
   process.stdout.write(
     `Starting Codex agent '${agentId}'.\n` +
-      (noBootstrap ? "Automatic bootstrap is disabled for this launch.\n" : "An initial bootstrap turn will run automatically.\n") +
-      `On the first launch, trust the project MCP server and SessionStart hook. If startup registration was skipped, run /clear ${agentId} and complete one turn, or relaunch.\n`,
+      (resuming
+        ? "Resuming an existing session; no bootstrap turn will run.\n"
+        : noBootstrap
+          ? "Automatic bootstrap is disabled for this launch.\n"
+          : "An initial bootstrap turn will run automatically.\n") +
+      "On the first launch, trust the project MCP server and SessionStart hook.\n" +
+      `Check registration with: npm --prefix agent-mesh run status\n`,
   );
 } else {
-  process.stdout.write(`Starting Claude Code agent '${agentId}'.\n`);
+  process.stdout.write(
+    `Starting Claude Code agent '${agentId}'.\n` +
+      (resuming ? "Resuming an existing session.\n" : ""),
+  );
 }
 
 const result = spawnSync(command, args, {
@@ -53,6 +138,7 @@ const result = spawnSync(command, args, {
     AGENT_MESH_KIND: kind,
   },
 });
+if (claimPath) rmSync(claimPath, { force: true });
 if (result.error) {
   process.stderr.write(`Failed to launch ${command}: ${result.error.message}\n`);
   process.exit(1);
