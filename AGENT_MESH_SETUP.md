@@ -7,7 +7,7 @@ This setup supports any combination of independently visible terminal sessions i
 - Claude Code → Codex
 - Claude Code → Claude Code
 
-Every session has a stable name and the same two MCP tools: `list_peers` and `send_peer`. Messages are addressed to one recipient by default; broadcast requires the explicit recipient `*`.
+Every session has a stable name and the same three MCP tools: `list_peers`, `peek_peer`, and `send_peer`. Messages are addressed to one recipient by default; broadcast requires the explicit recipient `*`.
 
 ## Install in a new project
 
@@ -123,6 +123,23 @@ Agent messages arrive with a structural envelope:
 ```
 
 The receiving agent answers the human normally and answers another agent through `send_peer`. This separation means a Codex final response no longer needs a marker, and Claude does not need UI keystrokes or `@name` routing.
+
+## Delivery is not instant, and cannot be recalled
+
+`codex queue` accepts a message into the recipient's queue immediately, but a Codex session only reads its queue between turns. A peer running a long task does not see the message until that task finishes, and a message addressed to a thread whose session has exited is accepted and never read at all. Codex reports both cases identically, so `send_peer` checks the recipient's own session log and reports which happened:
+
+```text
+Delivered: codex-b consumed it and can see it now.
+QUEUED, NOT YET DELIVERED: codex-b did not consume this within 2000 ms ...
+```
+
+Codex offers no way to cancel or edit a queued message, and re-sending queues a duplicate rather than replacing the original. When delivery is reported as queued, wait rather than re-sending, and check what the peer is doing:
+
+```text
+peek_peer(agent_id="codex-b")
+```
+
+which reports whether that session is working or idle, how long its current or last turn has run, any error it ended on, and its recent activity. This reads the peer's own session log; it does not interrupt it and does not consume the peer's model context. Codex exposes no way for one session to interrupt another, so a long task can only be waited out.
 
 The transport records each successfully delivered peer message exactly once, outside both models' contexts. To see the complete conversation across every Codex and Claude session in one extra terminal, run:
 

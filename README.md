@@ -9,7 +9,9 @@ Supported routes:
 - Claude Code → Codex
 - Claude Code → Claude Code
 
-Every session receives a stable ID and the same MCP tools: `list_peers` and `send_peer`. Codex recipients use native `codex queue`; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
+Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, and `send_peer`. Codex recipients use native `codex queue`; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
+
+A Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently.
 
 ## Install into a project
 

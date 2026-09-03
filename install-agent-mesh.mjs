@@ -34,7 +34,10 @@ This project can run multiple Codex and Claude Code sessions through the local \
 - Send every agent-directed message with the \`agent-mesh\` tool \`send_peer\`. Supply \`recipient\` whenever more than one other agent is registered. Use \`*\` only when an actual broadcast is intended.
 - An ordinary assistant response is addressed only to the human. Printing a peer reply in the terminal does not send it; call \`send_peer\`.
 - Do not call \`codex queue\` directly or read/write \`.agent-mesh\` runtime files. The mesh owns routing, exact session IDs, attribution, and recipient filtering.
-- A successful \`send_peer\` result confirms delivery into the target transport, not that the peer has completed a response.
+- A Codex peer reads a queued message only between its turns. A peer that is mid-task will not see your message until that task ends, which can be many minutes.
+- \`send_peer\` reports which happened: \`Delivered\` means the peer consumed the message and can see it; \`QUEUED, NOT YET DELIVERED\` means it is waiting for the peer's next turn boundary. Neither means the peer has answered.
+- A queued message cannot be cancelled or edited. Re-sending does not replace it, it queues a duplicate. If you got \`QUEUED\`, wait.
+- Use \`peek_peer\` to check whether a peer is working or idle, how long its current turn has run, and what it did recently. Do this before concluding that silence means a peer is ignoring you, and before escalating to the human.
 - Peer messages contain only what the sender deliberately sends. Peers do not automatically see one another's commentary, tool calls, tool results, or hidden reasoning.
 - Evaluate peer claims independently. Push back clearly with concrete evidence or reasoning when warranted; do not defer merely to preserve agreement and do not argue performatively.
 - When the human requests agent collaboration, continue substantive back-and-forth for as many turns as needed to develop, test, critique, and refine the work. Do not stop after one reply unless asked.
@@ -230,7 +233,7 @@ cwd = ${JSON.stringify(targetRoot)}
 env_vars = ["AGENT_MESH_ID", "AGENT_MESH_KIND"]
 enabled = true
 required = false
-enabled_tools = ["list_peers", "send_peer"]
+enabled_tools = ["list_peers", "peek_peer", "send_peer"]
 startup_timeout_sec = 10
 tool_timeout_sec = 30
 

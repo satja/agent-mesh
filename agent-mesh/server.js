@@ -23,6 +23,12 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import {
+  confirmConsumption,
+  describeDelivery,
+  peekSession,
+  describePeek,
+} from "./queue-status.mjs";
 
 const PROJECT_ROOT = resolve(process.env.AGENT_MESH_CWD || process.cwd());
 const STATE_DIR = join(PROJECT_ROOT, ".agent-mesh");
@@ -412,6 +418,10 @@ const instructions =
   "Messages beginning with '[From <kind> agent: <id> via agent-mesh]' came from another agent. " +
   "Use send_peer for every agent-directed response; an ordinary assistant response is only for the human user. " +
   "Continue substantive exchanges when collaboration is requested, but avoid acknowledgment-only loops. " +
+  "A Codex recipient reads a queued message only between its turns, so a peer that is mid-task may not " +
+  "see yours for a long time; send_peer reports whether the recipient actually consumed it, a queued " +
+  "message cannot be cancelled, and re-sending only queues a duplicate. Use peek_peer to see whether a " +
+  "peer is working or idle before assuming silence means it is ignoring you. " +
   "Evaluate peer claims independently and push back with evidence when warranted; the human remains the final authority.";
 
 const server = new Server(
@@ -433,6 +443,27 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "list_peers",
       description: "List agent identities registered in this project-local mesh.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: "peek_peer",
+      description:
+        "Report whether a peer session is working or idle, how long its current or last turn has run, and its recent activity. Use this when a peer has not replied, before assuming it is ignoring you or re-sending.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          agent_id: {
+            type: "string",
+            description: "Registered agent ID to observe. Omit only when exactly one other peer is registered.",
+          },
+        },
+        additionalProperties: false,
+      },
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -484,6 +515,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   }
+  if (request.params.name === "peek_peer") {
+    const { agent_id: requested } = request.params.arguments ?? {};
+    const targets = resolveTargets(requested);
+    const reports = targets.map((target) => {
+      if (target.kind !== "codex") {
+        return `${target.agent_id}: not observable (only Codex sessions write an inspectable rollout).`;
+      }
+      return describePeek(peekSession(target.session_id), target.agent_id);
+    });
+    return { content: [{ type: "text", text: reports.join("\n\n") }] };
+  }
   if (request.params.name !== "send_peer") {
     throw new Error(`Unknown tool: ${request.params.name}`);
   }
@@ -498,7 +540,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const outcomes = [];
   for (const target of targets) {
     if (target.kind === "codex") {
-      const result = await queueToCodex(target, message);
+      const queued = await queueToCodex(target, message);
+      // `codex queue` confirms acceptance, not delivery: a mid-turn session and
+      // a dead thread both accept. Tell the sender which one it got.
+      const status = await confirmConsumption({
+        sessionId: target.session_id,
+        message: envelope(message),
+      });
+      const result = `${queued}\n${describeDelivery(status, target.agent_id)}`;
+      log("info", "codex delivery status", {
+        recipient: target.agent_id,
+        state: status.state,
+        waited_ms: status.waited_ms ?? null,
+      });
       recordDeliveredMessage(target, message, "codex-queue", result);
       outcomes.push({
         recipient: target.agent_id,

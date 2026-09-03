@@ -14,6 +14,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const {
+  confirmConsumption,
+  peekSession,
+  describeDelivery,
+  searchNeedle,
+} = await import("./queue-status.mjs");
+
 const here = dirname(fileURLToPath(import.meta.url));
 const project = mkdtempSync(join(tmpdir(), "agent-mesh-test-"));
 const hook = join(here, "session-hook.js");
@@ -263,7 +270,10 @@ try {
 
   const tools = await codexA.request("tools/list", {});
   const names = tools.tools.map((tool) => tool.name);
-  assert(names.includes("list_peers") && names.includes("send_peer"), "missing tools");
+  assert(
+    names.includes("list_peers") && names.includes("send_peer") && names.includes("peek_peer"),
+    `missing tools: ${names.join(", ")}`,
+  );
   const listed = await codexA.call("list_peers", {});
   const peerData = JSON.parse(listed.content[0].text);
   assert(peerData.peers.some((peer) => peer.agent_id === "claude-b"), "Claude peer missing");
@@ -553,6 +563,105 @@ try {
     `stray launch did not name the symptom: ${strayLaunch.stderr}`,
   );
   pass("Launching outside an installed project fails with the symptom named");
+
+  // A rollout is the only observable that separates "Codex accepted the item"
+  // from "the recipient actually read it", and it is what peek_peer reads.
+  const rolloutRoot = join(project, "codex-sessions", "2026", "09", "03");
+  mkdirSync(rolloutRoot, { recursive: true });
+  const writeRollout = (sessionId, records) =>
+    writeFileSync(
+      join(rolloutRoot, `rollout-2026-09-03T00-00-00-${sessionId}.jsonl`),
+      records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+    );
+  const at = (offsetMs) => new Date(Date.now() - offsetMs).toISOString();
+
+  writeRollout("sess-consumed", [
+    { timestamp: at(5000), type: "event_msg", payload: { type: "task_started", turn_id: "t1" } },
+    {
+      timestamp: at(4000),
+      type: "response_item",
+      payload: { type: "message", role: "user", content: "peer message body that is long enough to match" },
+    },
+    {
+      timestamp: at(3000),
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "t1", duration_ms: 2000 },
+    },
+  ]);
+  writeRollout("sess-busy", [
+    {
+      timestamp: at(90000),
+      type: "event_msg",
+      payload: { type: "item_completed", item: { type: "CommandExecution", command: "python3 long_job.py" } },
+    },
+    { timestamp: at(60000), type: "event_msg", payload: { type: "task_started", turn_id: "t9" } },
+  ]);
+  writeRollout("sess-errored", [
+    { timestamp: at(9000), type: "event_msg", payload: { type: "task_started", turn_id: "t2" } },
+    {
+      timestamp: at(8000),
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "t2", error: { message: "Your workspace is out of credits." } },
+    },
+  ]);
+  process.env.AGENT_MESH_CODEX_SESSIONS = join(project, "codex-sessions");
+
+  assert(
+    searchNeedle("peer message body that is long enough to match") !== null,
+    "searchNeedle found nothing to match on ordinary prose",
+  );
+
+  const consumed = await confirmConsumption({
+    sessionId: "sess-consumed",
+    message: "peer message body that is long enough to match",
+    budgetMs: 500,
+  });
+  assert(consumed.state === "consumed", `consumed message reported as ${consumed.state}`);
+
+  const pending = await confirmConsumption({
+    sessionId: "sess-busy",
+    message: "a different message body that was never consumed at all",
+    budgetMs: 400,
+    pollMs: 100,
+  });
+  assert(pending.state === "pending", `unconsumed message reported as ${pending.state}`);
+  const warning = describeDelivery(pending, "codex-b");
+  assert(/NOT YET DELIVERED/.test(warning), "pending delivery was not flagged as undelivered");
+  assert(/cannot cancel/.test(warning), "pending delivery did not say the message cannot be cancelled");
+  assert(/[Dd]o not re-send/.test(warning), "pending delivery did not warn against re-sending");
+  assert(
+    /Delivered/.test(describeDelivery(consumed, "codex-b")),
+    "consumed delivery was not reported as delivered",
+  );
+
+  const missing = await confirmConsumption({
+    sessionId: "sess-does-not-exist",
+    message: "any message body long enough to be matchable here",
+    budgetMs: 200,
+  });
+  assert(missing.state === "unknown", "an unobservable session did not degrade to unknown");
+  pass("Codex delivery is confirmed from the recipient rollout, not the queue acknowledgement");
+
+  const busy = peekSession("sess-busy");
+  assert(busy.state === "working", `a mid-turn session reported ${busy.state}`);
+  assert(busy.since_ms >= 50000, `mid-turn elapsed time looks wrong: ${busy.since_ms}`);
+  assert(
+    busy.recent.some((entry) => /python3 long_job.py/.test(entry.detail)),
+    "peek did not surface the peer's recent command",
+  );
+  const idle = peekSession("sess-consumed");
+  assert(idle.state === "idle", `a finished session reported ${idle.state}`);
+  const errored = peekSession("sess-errored");
+  assert(
+    /out of credits/.test(errored.last_error || ""),
+    "peek did not surface the peer's last turn error",
+  );
+  assert(
+    peekSession("sess-does-not-exist").state === "unknown",
+    "peek did not degrade to unknown for an unobservable session",
+  );
+  delete process.env.AGENT_MESH_CODEX_SESSIONS;
+  pass("peek_peer reports whether a peer is working, idle, or failing");
 
   clearTimeout(timeout);
   cleanup();
