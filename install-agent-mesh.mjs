@@ -173,6 +173,7 @@ mkdirSync(join(targetRoot, ".codex"), { recursive: true });
 
 for (const relativePath of [
   "agent-mesh/server.js",
+  "agent-mesh/queue-status.mjs",
   "agent-mesh/session-hook.js",
   "agent-mesh/start",
   "agent-mesh/watch",
