@@ -14,7 +14,15 @@
 // agent doing". It is plain JSONL, which matters: Node 20 has no node:sqlite
 // and the queue database cannot be read without adding a native dependency.
 
-import { existsSync, openSync, readSync, closeSync, statSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  openSync,
+  readSync,
+  closeSync,
+  statSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -156,6 +164,86 @@ export function threadNeverOpened(sessionId) {
     `${sessionId}.lock`,
   );
   return !existsSync(lock);
+}
+
+// ------------------------------------------------------------------ inbox
+
+// What has been sent to me that I have not yet taken off the queue?
+//
+// Deliberately metadata only: senders, counts and ages, never message bodies.
+// Codex owns the queue and the mesh cannot remove an item from it, so anything
+// reported here will still be delivered normally at the next turn boundary.
+// Handing the body over early would mean the agent sees the same request twice
+// and can act on it twice; knowing only that someone is waiting carries the
+// whole benefit with none of that risk.
+export function pendingForSelf({ selfId, sessionId, ledgerPath, maxRecords = 100 }) {
+  const rollout = rolloutPathFor(sessionId);
+  if (!rollout) return { observable: false, reason: "no rollout file for this session", waiting: [] };
+  if (!existsSync(ledgerPath)) return { observable: true, waiting: [] };
+
+  let addressed = [];
+  try {
+    for (const line of readFileSync(ledgerPath, "utf8").split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const record = JSON.parse(line);
+        if (record.recipient_id === selfId) addressed.push(record);
+      } catch {
+        // A partially written ledger line is not worth failing over.
+      }
+    }
+  } catch {
+    return { observable: false, reason: "ledger unreadable", waiting: [] };
+  }
+  addressed = addressed.slice(-maxRecords);
+  if (!addressed.length) return { observable: true, waiting: [] };
+
+  // Read the rollout in full here rather than the tail: a message may have been
+  // consumed long enough ago to have scrolled out of a tail window, and calling
+  // it "waiting" would be worse than the cost of one read.
+  let consumedText = "";
+  try {
+    consumedText = readFileSync(rollout, "utf8");
+  } catch {
+    return { observable: false, reason: "rollout unreadable", waiting: [] };
+  }
+
+  const now = Date.now();
+  const waiting = [];
+  for (const record of addressed) {
+    const needle = searchNeedle(String(record.message || ""));
+    if (!needle || consumedText.includes(needle)) continue;
+    const sentAt = Date.parse(record.created_at || "");
+    waiting.push({
+      sender_id: record.sender_id || "unknown",
+      created_at: record.created_at || null,
+      age_ms: Number.isFinite(sentAt) ? now - sentAt : null,
+    });
+  }
+  return { observable: true, waiting };
+}
+
+export function describeInbox(inbox, selfKind) {
+  if (selfKind === "claude") {
+    return (
+      "Messages to this session are pushed live and are never held in a queue, so nothing " +
+      "can be waiting. (A message sent while this session was not running was dropped at " +
+      "the time, not queued.)"
+    );
+  }
+  if (!inbox.observable) return `Inbox not observable (${inbox.reason}).`;
+  if (!inbox.waiting.length) {
+    return "Nothing waiting. Every message addressed to you has already been delivered.";
+  }
+  const lines = [
+    `${inbox.waiting.length} message(s) waiting for you, and they will arrive at your next ` +
+      "turn boundary. Senders and ages only; the text is withheld so you do not act on the " +
+      "same request twice. If you are mid-task, consider finishing sooner.",
+  ];
+  for (const entry of inbox.waiting) {
+    lines.push(`  from ${entry.sender_id}, sent ${humanMs(entry.age_ms)} ago`);
+  }
+  return lines.join("\n");
 }
 
 // ------------------------------------------------------------------- peek

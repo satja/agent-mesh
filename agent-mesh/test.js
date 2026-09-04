@@ -19,6 +19,8 @@ const {
   peekSession,
   describeDelivery,
   searchNeedle,
+  pendingForSelf,
+  describeInbox,
 } = await import("./queue-status.mjs");
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -279,7 +281,7 @@ try {
   const tools = await codexA.request("tools/list", {});
   const names = tools.tools.map((tool) => tool.name);
   assert(
-    names.includes("list_peers") && names.includes("send_peer") && names.includes("peek_peer"),
+    ["list_peers", "send_peer", "peek_peer", "check_inbox"].every((tool) => names.includes(tool)),
     `missing tools: ${names.join(", ")}`,
   );
   const listed = await codexA.call("list_peers", {});
@@ -732,6 +734,70 @@ try {
     );
   }
   pass("Every module server.js imports is part of the installer bundle");
+
+  // check_inbox must report what is still queued for this agent, and must never
+  // hand over the message text: Codex will deliver the real message at the next
+  // turn boundary and the mesh cannot cancel it, so an agent that acted on the
+  // body here would act on the same request twice.
+  const inboxLedger = join(project, "inbox-ledger.jsonl");
+  const secret = "the body of this message must never be handed over early";
+  writeFileSync(
+    inboxLedger,
+    [
+      {
+        recipient_id: "codex-inbox",
+        sender_id: "codex-a",
+        created_at: new Date(Date.now() - 720000).toISOString(),
+        message: secret,
+      },
+      {
+        recipient_id: "codex-inbox",
+        sender_id: "claude-b",
+        created_at: new Date(Date.now() - 60000).toISOString(),
+        message: "a second message body that was already consumed by this agent",
+      },
+      {
+        recipient_id: "someone-else",
+        sender_id: "codex-a",
+        created_at: new Date().toISOString(),
+        message: "addressed to a different agent entirely and must not be counted",
+      },
+    ]
+      .map((record) => JSON.stringify(record))
+      .join("\n") + "\n",
+  );
+  writeRollout("sess-inbox", [
+    {
+      timestamp: at(30000),
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: "a second message body that was already consumed by this agent",
+      },
+    },
+    { timestamp: at(20000), type: "event_msg", payload: { type: "task_started", turn_id: "t7" } },
+  ]);
+  process.env.AGENT_MESH_CODEX_SESSIONS = join(project, "codex-sessions");
+  const inbox = pendingForSelf({
+    selfId: "codex-inbox",
+    sessionId: "sess-inbox",
+    ledgerPath: inboxLedger,
+  });
+  assert(inbox.observable, `inbox was not observable: ${inbox.reason}`);
+  assert(inbox.waiting.length === 1, `expected 1 waiting message, got ${inbox.waiting.length}`);
+  assert(inbox.waiting[0].sender_id === "codex-a", "waiting message named the wrong sender");
+  assert(inbox.waiting[0].age_ms >= 700000, `waiting age looks wrong: ${inbox.waiting[0].age_ms}`);
+  const inboxText = describeInbox(inbox, "codex");
+  assert(/1 message\(s\) waiting/.test(inboxText), `inbox summary was unclear: ${inboxText}`);
+  assert(/codex-a/.test(inboxText), "inbox summary did not name the sender");
+  assert(!inboxText.includes(secret), "check_inbox leaked the message body");
+  assert(
+    /pushed live/.test(describeInbox(inbox, "claude")),
+    "a Claude session was not told its messages never queue",
+  );
+  delete process.env.AGENT_MESH_CODEX_SESSIONS;
+  pass("check_inbox counts waiting messages by sender without revealing their text");
 
   clearTimeout(timeout);
   cleanup();

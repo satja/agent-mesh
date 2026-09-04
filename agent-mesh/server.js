@@ -29,6 +29,8 @@ import {
   peekSession,
   describePeek,
   threadNeverOpened,
+  pendingForSelf,
+  describeInbox,
 } from "./queue-status.mjs";
 
 const PROJECT_ROOT = resolve(process.env.AGENT_MESH_CWD || process.cwd());
@@ -446,6 +448,10 @@ const instructions =
   "see yours for a long time; send_peer reports whether the recipient actually consumed it, a queued " +
   "message cannot be cancelled, and re-sending only queues a duplicate. Use peek_peer to see whether a " +
   "peer is working or idle before assuming silence means it is ignoring you. " +
+  "The same applies to you: while you are running a long task you cannot receive peer messages, " +
+  "so say so before starting one, and prefer steps that reach turn boundaries over a single very " +
+  "long blocking call. Call check_inbox during a long task to learn whether peers are waiting on " +
+  "you; it reports senders and ages only, and each message still arrives normally afterwards. " +
   "Evaluate peer claims independently and push back with evidence when warranted; the human remains the final authority.";
 
 const server = new Server(
@@ -466,6 +472,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "list_peers",
       description: "List agent identities registered in this project-local mesh.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    {
+      name: "check_inbox",
+      description:
+        "Report how many peer messages are waiting for you and who sent them, without their text. Safe to call while you are mid-task: it tells you someone is waiting so you can finish sooner, and the messages still arrive normally at your next turn boundary.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: {
         readOnlyHint: true,
@@ -538,6 +556,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       ],
     };
+  }
+  if (request.params.name === "check_inbox") {
+    let ownSessionId = null;
+    try {
+      ownSessionId = JSON.parse(
+        readFileSync(join(SESSION_DIR, `${selfId}.json`), "utf8"),
+      ).session_id;
+    } catch {
+      ownSessionId = null;
+    }
+    const inbox = pendingForSelf({
+      selfId,
+      sessionId: ownSessionId,
+      ledgerPath: MESSAGE_LOG,
+    });
+    return { content: [{ type: "text", text: describeInbox(inbox, selfKind) }] };
   }
   if (request.params.name === "peek_peer") {
     const { agent_id: requested } = request.params.arguments ?? {};

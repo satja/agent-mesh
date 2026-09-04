@@ -38,6 +38,8 @@ This project can run multiple Codex and Claude Code sessions through the local \
 - \`send_peer\` reports which happened: \`Delivered\` means the peer consumed the message and can see it; \`QUEUED, NOT YET DELIVERED\` means it is waiting for the peer's next turn boundary. Neither means the peer has answered.
 - A queued message cannot be cancelled or edited. Re-sending does not replace it, it queues a duplicate. If you got \`QUEUED\`, wait.
 - Use \`peek_peer\` to check whether a peer is working or idle, how long its current turn has run, and what it did recently. Do this before concluding that silence means a peer is ignoring you, and before escalating to the human.
+- The same limit applies to you. While you are running a long task you cannot receive peer messages, so say so before starting one, and prefer a sequence of steps that reach turn boundaries over a single very long blocking call.
+- Call \`check_inbox\` during a long task to learn whether peers are waiting on you. It reports senders and ages only, never message text, and each message still arrives normally at your next turn boundary. If peers are waiting, consider finishing sooner.
 - Peer messages contain only what the sender deliberately sends. Peers do not automatically see one another's commentary, tool calls, tool results, or hidden reasoning.
 - Evaluate peer claims independently. Push back clearly with concrete evidence or reasoning when warranted; do not defer merely to preserve agreement and do not argue performatively.
 - When the human requests agent collaboration, continue substantive back-and-forth for as many turns as needed to develop, test, critique, and refine the work. Do not stop after one reply unless asked.
@@ -234,7 +236,7 @@ cwd = ${JSON.stringify(targetRoot)}
 env_vars = ["AGENT_MESH_ID", "AGENT_MESH_KIND"]
 enabled = true
 required = false
-enabled_tools = ["list_peers", "peek_peer", "send_peer"]
+enabled_tools = ["check_inbox", "list_peers", "peek_peer", "send_peer"]
 startup_timeout_sec = 10
 tool_timeout_sec = 30
 

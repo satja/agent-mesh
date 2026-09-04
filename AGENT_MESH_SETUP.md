@@ -7,7 +7,7 @@ This setup supports any combination of independently visible terminal sessions i
 - Claude Code → Codex
 - Claude Code → Claude Code
 
-Every session has a stable name and the same three MCP tools: `list_peers`, `peek_peer`, and `send_peer`. Messages are addressed to one recipient by default; broadcast requires the explicit recipient `*`.
+Every session has a stable name and the same four MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Messages are addressed to one recipient by default; broadcast requires the explicit recipient `*`.
 
 ## Install in a new project
 
@@ -147,7 +147,17 @@ Codex offers no way to cancel or edit a queued message, and re-sending queues a 
 peek_peer(agent_id="codex-b")
 ```
 
-which reports whether that session is working or idle, how long its current or last turn has run, any error it ended on, and its recent activity. This reads the peer's own session log; it does not interrupt it and does not consume the peer's model context. Codex exposes no way for one session to interrupt another, so a long task can only be waited out.
+which reports whether that session is working or idle, how long its current or last turn has run, any error it ended on, and its recent activity.
+
+The limit is symmetric, so an agent cannot receive while it is working either. `check_inbox` lets it find out mid-task that someone is waiting:
+
+```text
+2 message(s) waiting for you, and they will arrive at your next turn boundary.
+  from codex-a, sent 12m ago
+  from claude-b, sent 3m ago
+```
+
+It reports senders and ages only. The mesh cannot remove an item from Codex's queue, so every message reported here is still delivered normally afterwards; withholding the text is what stops an agent acting on the same request twice. An agent that finds peers waiting should prefer to finish its current task sooner. This reads the peer's own session log; it does not interrupt it and does not consume the peer's model context. Codex exposes no way for one session to interrupt another, so a long task can only be waited out.
 
 The transport records each successfully delivered peer message exactly once, outside both models' contexts. To see the complete conversation across every Codex and Claude session in one extra terminal, run:
 
