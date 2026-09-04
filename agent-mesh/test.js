@@ -21,6 +21,7 @@ const {
   searchNeedle,
   pendingForSelf,
   describeInbox,
+  describePeek,
 } = await import("./queue-status.mjs");
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -806,11 +807,11 @@ try {
   const secondPeek = await codexA.call("peek_peer", { agent_id: "codex-b" });
   const peekText = (result) => result.content.map((part) => part.text).join("");
   assert(
-    !/unchanged since you last checked/.test(peekText(firstPeek)),
+    !/has not moved since you checked/.test(peekText(firstPeek)),
     "the first peek was treated as a repeat",
   );
   assert(
-    /unchanged since you last checked/.test(peekText(secondPeek)),
+    /has not moved since you checked/.test(peekText(secondPeek)),
     `an immediate repeat peek was not discouraged: ${peekText(secondPeek)}`,
   );
   assert(
@@ -818,6 +819,46 @@ try {
     "the repeat peek did not say why polling is useless",
   );
   pass("A repeat peek that learned nothing is told so instead of encouraging a poll");
+
+  // Suppressing a repeat is only correct when nothing moved. A peer that stays
+  // inside one turn but starts different work has told the caller something new,
+  // and hiding that would make the backstop actively misleading.
+  const movingSession = "sess-moving";
+  const movingSteps = [
+    { timestamp: at(40000), type: "event_msg", payload: { type: "task_started", turn_id: "t5" } },
+    {
+      timestamp: at(30000),
+      type: "event_msg",
+      payload: { type: "item_completed", item: { type: "CommandExecution", command: "step one" } },
+    },
+  ];
+  process.env.AGENT_MESH_CODEX_SESSIONS = join(project, "codex-sessions");
+  writeRollout(movingSession, movingSteps);
+  const before = peekSession(movingSession);
+  writeRollout(movingSession, [
+    ...movingSteps,
+    {
+      timestamp: at(1000),
+      type: "event_msg",
+      payload: { type: "item_completed", item: { type: "CommandExecution", command: "step two" } },
+    },
+  ]);
+  const after = peekSession(movingSession);
+  assert(
+    before.state === after.state && before.turn_id === after.turn_id,
+    "the fixture did not keep the peer inside the same turn",
+  );
+  const fingerprint = (peek) => JSON.stringify(peek.recent[peek.recent.length - 1]);
+  assert(
+    fingerprint(before) !== fingerprint(after),
+    "new work inside the same turn was not visible to the repeat check",
+  );
+  assert(
+    /step two/.test(describePeek(after, "codex-moving")),
+    "the peer's newest command was not reported",
+  );
+  delete process.env.AGENT_MESH_CODEX_SESSIONS;
+  pass("New work inside the same turn still counts as a change worth reporting");
 
   clearTimeout(timeout);
   cleanup();

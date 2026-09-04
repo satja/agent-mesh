@@ -589,21 +589,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return `${target.agent_id}: not observable (only Codex sessions write an inspectable rollout).`;
       }
       const peek = peekSession(target.session_id);
-      // Watching a peer cannot make its turn end sooner, so a repeat call that
-      // learned nothing gets told that rather than encouraged to keep looping.
+      // A peer can stay inside one turn and still move on to different work, and
+      // that is genuinely new information. Only a peek that learned literally
+      // nothing is suppressed, since watching cannot make a turn end sooner.
+      const latest = peek.recent?.length ? JSON.stringify(peek.recent[peek.recent.length - 1]) : "";
       const previous = lastPeek.get(target.agent_id);
       const unchanged =
         previous &&
         Date.now() - previous.at < PEEK_REPEAT_MS &&
         previous.state === peek.state &&
-        previous.turn_id === peek.turn_id;
-      lastPeek.set(target.agent_id, { at: Date.now(), state: peek.state, turn_id: peek.turn_id });
+        previous.turn_id === peek.turn_id &&
+        previous.latest === latest;
+      lastPeek.set(target.agent_id, {
+        at: Date.now(),
+        state: peek.state,
+        turn_id: peek.turn_id,
+        latest,
+      });
       if (unchanged) {
+        const ago = Math.round((Date.now() - previous.at) / 1000);
         return (
-          `${target.agent_id} is unchanged since you last checked ` +
-          `${Math.round((Date.now() - previous.at) / 1000)}s ago (still ${peek.state}). ` +
-          "Checking again will not release its message any sooner; that happens when its own " +
-          "turn ends. Do something else or hand back to the human."
+          `${target.agent_id} has not moved since you checked ${ago}s ago: same turn, same last ` +
+          `action, still ${peek.state}. Checking again will not release its message any sooner, ` +
+          "because that happens when its own turn ends. Do other work or hand back to the human, " +
+          `and if you must look again leave it at least ${Math.round(PEEK_REPEAT_MS / 60000)} ` +
+          "minutes."
         );
       }
       return describePeek(peek, target.agent_id);
