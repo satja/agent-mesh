@@ -70,3 +70,26 @@ The installer is project-local and non-destructive: it merges managed configurat
 npm --prefix agent-mesh ci
 npm --prefix agent-mesh test
 ```
+
+## Compatibility and scope
+
+This mesh drives Codex through its own CLI and reads its local session state:
+`codex queue` for delivery, the rollout JSONL under `~/.codex/sessions` to tell
+a delivered message from a merely queued one, and the writer locks under
+`~/.codex/thread-writer-locks` to reject a thread no session ever opened. None
+of that is a published API. It is built and tested against **Codex CLI 0.153.0**
+on **Linux**, and a future Codex release can move or rename any of it. If
+delivery reporting starts saying "unconfirmed", that is the first thing to
+check. Requires Codex 0.149.0 or newer for `codex queue` at all.
+
+Process ancestry in the SessionStart hook reads `/proc`, so identity resolution
+falls back to a less precise path on macOS when several agents start at once.
+
+`peek_peer` reads another local session's rollout to report whether it is
+working, what it ran recently, and any error it ended on. Every session here
+belongs to the same person on the same machine, but be aware that agents can
+see that much about each other.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

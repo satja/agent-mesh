@@ -128,6 +128,10 @@ function writeRegistration(record) {
   renameSync(temporary, target);
 }
 
+// A second peek inside this window that finds the same turn still running has
+// learned nothing, and is almost always the start of a polling loop.
+const PEEK_REPEAT_MS = 120000;
+const lastPeek = new Map();
 const STAMP_RETRY_MS = 2000;
 const MAX_STAMP_ATTEMPTS = 45;
 let stampAttempts = 0;
@@ -448,6 +452,10 @@ const instructions =
   "see yours for a long time; send_peer reports whether the recipient actually consumed it, a queued " +
   "message cannot be cancelled, and re-sending only queues a duplicate. Use peek_peer to see whether a " +
   "peer is working or idle before assuming silence means it is ignoring you. " +
+  "Observe once and then act on what you learn: peek_peer and check_inbox are decision aids, " +
+  "not wait loops. Polling them repeatedly makes nothing arrive sooner, because a peer's message " +
+  "is released by its own turn ending and not by being watched. If a peer is working, stop " +
+  "checking and either do other work or hand back to the human. " +
   "The same applies to you: while you are running a long task you cannot receive peer messages, " +
   "so say so before starting one, and prefer steps that reach turn boundaries over a single very " +
   "long blocking call. Call check_inbox during a long task to learn whether peers are waiting on " +
@@ -580,7 +588,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (target.kind !== "codex") {
         return `${target.agent_id}: not observable (only Codex sessions write an inspectable rollout).`;
       }
-      return describePeek(peekSession(target.session_id), target.agent_id);
+      const peek = peekSession(target.session_id);
+      // Watching a peer cannot make its turn end sooner, so a repeat call that
+      // learned nothing gets told that rather than encouraged to keep looping.
+      const previous = lastPeek.get(target.agent_id);
+      const unchanged =
+        previous &&
+        Date.now() - previous.at < PEEK_REPEAT_MS &&
+        previous.state === peek.state &&
+        previous.turn_id === peek.turn_id;
+      lastPeek.set(target.agent_id, { at: Date.now(), state: peek.state, turn_id: peek.turn_id });
+      if (unchanged) {
+        return (
+          `${target.agent_id} is unchanged since you last checked ` +
+          `${Math.round((Date.now() - previous.at) / 1000)}s ago (still ${peek.state}). ` +
+          "Checking again will not release its message any sooner; that happens when its own " +
+          "turn ends. Do something else or hand back to the human."
+        );
+      }
+      return describePeek(peek, target.agent_id);
     });
     return { content: [{ type: "text", text: reports.join("\n\n") }] };
   }

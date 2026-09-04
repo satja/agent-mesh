@@ -799,6 +799,26 @@ try {
   delete process.env.AGENT_MESH_CODEX_SESSIONS;
   pass("check_inbox counts waiting messages by sender without revealing their text");
 
+  // Watching a peer cannot make its turn end sooner, so a repeat peek that
+  // learned nothing must say so rather than hand back the same report and
+  // invite another round of polling.
+  const firstPeek = await codexA.call("peek_peer", { agent_id: "codex-b" });
+  const secondPeek = await codexA.call("peek_peer", { agent_id: "codex-b" });
+  const peekText = (result) => result.content.map((part) => part.text).join("");
+  assert(
+    !/unchanged since you last checked/.test(peekText(firstPeek)),
+    "the first peek was treated as a repeat",
+  );
+  assert(
+    /unchanged since you last checked/.test(peekText(secondPeek)),
+    `an immediate repeat peek was not discouraged: ${peekText(secondPeek)}`,
+  );
+  assert(
+    /will not release its message any sooner/.test(peekText(secondPeek)),
+    "the repeat peek did not say why polling is useless",
+  );
+  pass("A repeat peek that learned nothing is told so instead of encouraging a poll");
+
   clearTimeout(timeout);
   cleanup();
 } catch (error) {

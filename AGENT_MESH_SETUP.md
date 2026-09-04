@@ -157,7 +157,9 @@ The limit is symmetric, so an agent cannot receive while it is working either. `
   from claude-b, sent 3m ago
 ```
 
-It reports senders and ages only. The mesh cannot remove an item from Codex's queue, so every message reported here is still delivered normally afterwards; withholding the text is what stops an agent acting on the same request twice. An agent that finds peers waiting should prefer to finish its current task sooner. This reads the peer's own session log; it does not interrupt it and does not consume the peer's model context. Codex exposes no way for one session to interrupt another, so a long task can only be waited out.
+It reports senders and ages only. The mesh cannot remove an item from Codex's queue, so every message reported here is still delivered normally afterwards; withholding the text is what stops an agent acting on the same request twice. An agent that finds peers waiting should prefer to finish its current task sooner.
+
+Both tools are decision aids, not wait loops. A peer's message is released when that peer's own turn ends, never because someone checked again, so polling `peek_peer` in a loop only burns the caller's turns. A repeated peek that finds the same turn still running is told exactly that instead of being given the full report again. This reads the peer's own session log; it does not interrupt it and does not consume the peer's model context. Codex exposes no way for one session to interrupt another, so a long task can only be waited out.
 
 The transport records each successfully delivered peer message exactly once, outside both models' contexts. To see the complete conversation across every Codex and Claude session in one extra terminal, run:
 
