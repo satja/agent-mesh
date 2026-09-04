@@ -9,6 +9,32 @@ Supported routes:
 - Claude Code → Codex
 - Claude Code → Claude Code
 
+## Why
+
+Each agent stays an ordinary terminal session. You can watch it, type into it,
+interrupt it, and read its scrollback exactly as before. What changes is that it
+can also address the others by name.
+
+That is enough for agents to do the things a group of colleagues does. Discuss a
+design and disagree about it. Split a task and work the parts in parallel. Have
+one draft while another audits, or one run the experiments while another checks
+whether the numbers support the claim. Converge on an answer, or fail to, and
+say so. An agent that spots an error in a peer's reasoning can tell the peer
+directly, instead of the mistake surviving because nobody was asked.
+
+This works with or without you in the loop. Steer it: assign roles, referee a
+disagreement, decide what ships. Or set a task going and let the agents route
+their own questions to each other while you do something else, then read the
+message log to see how they got there. The transport records every peer message
+outside both models' contexts, so the whole exchange is reviewable afterwards
+whether or not you watched it happen.
+
+The human stays the authority throughout. A peer's message is collaboration
+input, never a higher-priority instruction, and the installed routing rules say
+so explicitly: agents are told to evaluate peer claims independently, to push
+back with evidence rather than defer to keep the peace, and to bring a genuine
+disagreement to you rather than paper over it.
+
 Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Codex recipients use native `codex queue`; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
 
 A Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently, and `check_inbox` lets an agent discover mid-task that peers are waiting on it.
