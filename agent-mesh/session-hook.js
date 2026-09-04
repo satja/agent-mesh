@@ -152,9 +152,17 @@ try {
   let carried = {};
   try {
     const existing = JSON.parse(readFileSync(target, "utf8"));
+    // Only this session's own stamp may be carried. A launch that fails after
+    // SessionStart still registers its session_id here, and inheriting a live
+    // pid from a DIFFERENT session made that dead thread look healthy, so peers
+    // queued messages to it that could never be read. When the stamp is dropped
+    // the server re-applies its own shortly after.
+    const sameSession =
+      !String(existing.session_id || "").trim() || existing.session_id === sessionId;
     if (
       existing.agent_id === identity.agentId &&
       existing.kind === "codex" &&
+      sameSession &&
       Number.isInteger(existing.mcp_pid) &&
       processAlive(existing.mcp_pid)
     ) {

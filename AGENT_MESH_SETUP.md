@@ -133,6 +133,14 @@ Delivered: codex-b consumed it and can see it now.
 QUEUED, NOT YET DELIVERED: codex-b did not consume this within 2000 ms ...
 ```
 
+If the recipient is registered on a thread that no Codex session ever opened, `send_peer` refuses outright and sends nothing, rather than queueing a message that could never be read:
+
+```text
+codex-a is registered on thread 01a0675c-..., which no Codex session ever opened ... Nothing was sent.
+```
+
+This happens when a launch fails after startup and leaves a stale registration behind. Relaunch that agent with an explicit session id and send again.
+
 Codex offers no way to cancel or edit a queued message, and re-sending queues a duplicate rather than replacing the original. When delivery is reported as queued, wait rather than re-sending, and check what the peer is doing:
 
 ```text

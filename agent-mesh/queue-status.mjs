@@ -141,6 +141,23 @@ export function describeDelivery(status, recipientId) {
   return `Delivery unconfirmed (${status.reason}); Codex accepted the message into the queue.`;
 }
 
+// ------------------------------------------------------------- live writer
+
+// Codex takes a per-thread writer lock when a session successfully opens a
+// thread, and leaves the lock file behind afterwards. So the file's ABSENCE is
+// conclusive: no session ever opened that thread, and anything queued to it can
+// never be read. Its presence is weaker and only means some session opened it
+// at some point, which is why the registry's own mcp_pid liveness check still
+// does the work of spotting a session that has since exited.
+export function threadNeverOpened(sessionId) {
+  if (!sessionId) return true;
+  const lock = join(
+    process.env.AGENT_MESH_CODEX_LOCKS || join(homedir(), ".codex", "thread-writer-locks"),
+    `${sessionId}.lock`,
+  );
+  return !existsSync(lock);
+}
+
 // ------------------------------------------------------------------- peek
 
 function describeItem(item) {

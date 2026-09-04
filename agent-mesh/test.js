@@ -33,6 +33,11 @@ const messageLog = join(project, ".agent-mesh", "messages.jsonl");
 const fakeCodex = join(project, "fake-codex");
 const launchLog = join(project, "launch.json");
 const fakeLauncherCodex = join(project, "fake-launcher-codex");
+// Codex writes a per-thread writer lock when a session really opens a thread.
+// The suite must mirror that, since delivery now refuses threads that lack one.
+const threadLocks = join(project, "thread-writer-locks");
+mkdirSync(threadLocks, { recursive: true });
+const openThread = (sessionId) => writeFileSync(join(threadLocks, `${sessionId}.lock`), "");
 const children = [];
 
 writeFileSync(
@@ -83,6 +88,7 @@ function launchArgs(agentKind, agentId, extraArgs, bin) {
 }
 
 function registerCodex(agentId, sessionId) {
+  openThread(sessionId);
   const result = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({
       hook_event_name: "SessionStart",
@@ -100,6 +106,7 @@ function registerCodex(agentId, sessionId) {
 }
 
 function registerCodexWithoutEnv(sessionId) {
+  openThread(sessionId);
   const env = { ...process.env };
   delete env.AGENT_MESH_ID;
   delete env.AGENT_MESH_KIND;
@@ -135,6 +142,7 @@ class McpProcess {
         AGENT_MESH_CWD: project,
         AGENT_MESH_CODEX_BIN: fakeCodex,
         AGENT_MESH_TEST_QUEUE_LOG: queueLog,
+        AGENT_MESH_CODEX_LOCKS: threadLocks,
         ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -519,27 +527,71 @@ try {
   );
   pass("Status resolves the project root when cwd is the install directory");
 
-  // The MCP server normally stamps liveness before the hook writes the record.
+  // The MCP server normally stamps liveness before the hook writes the record,
+  // and the hook must keep that stamp when it belongs to this same session.
   const stamped = join(project, ".agent-mesh", "sessions", "codex-stamped.json");
-  writeFileSync(
-    stamped,
+  const stampedRecord = (sessionId) =>
     JSON.stringify({
       agent_id: "codex-stamped",
       kind: "codex",
-      session_id: "session-old",
+      session_id: sessionId,
       cwd: project,
       mcp_pid: process.pid,
       mcp_started_at: "2026-01-01T00:00:00.000Z",
       registered_at: "2026-01-01T00:00:00.000Z",
+    });
+  writeFileSync(stamped, stampedRecord("session-same"));
+  registerCodex("codex-stamped", "session-same");
+  const kept = sessionRecord("codex-stamped");
+  assert(
+    kept.session_id === "session-same" && kept.mcp_pid === process.pid,
+    `hook clobbered this session's own live MCP stamp: ${JSON.stringify(kept)}`,
+  );
+  pass("SessionStart preserves a live MCP liveness stamp for the same session");
+
+  // A launch that fails after SessionStart registers its own session_id while a
+  // different session's server is still running. Inheriting that live pid made
+  // the dead thread look healthy, and peers queued messages into the void.
+  writeFileSync(stamped, stampedRecord("session-old"));
+  registerCodex("codex-stamped", "session-new");
+  const rotated = sessionRecord("codex-stamped");
+  assert(
+    rotated.session_id === "session-new" && rotated.mcp_pid === undefined,
+    `hook carried another session's liveness stamp: ${JSON.stringify(rotated)}`,
+  );
+  pass("SessionStart drops a liveness stamp belonging to a different session");
+
+  // Delivery must refuse a thread no Codex session ever opened, rather than
+  // queueing a message that can never be read and cannot be recalled.
+  writeFileSync(
+    join(project, ".agent-mesh", "sessions", "codex-ghost.json"),
+    JSON.stringify({
+      agent_id: "codex-ghost",
+      kind: "codex",
+      session_id: "session-never-opened",
+      cwd: project,
+      mcp_pid: process.pid,
+      registered_at: new Date().toISOString(),
     }),
   );
-  registerCodex("codex-stamped", "session-new");
-  const merged = sessionRecord("codex-stamped");
+  const queuedBefore = readFileSync(queueLog, "utf8");
+  let refusal = null;
+  try {
+    await codexA.call("send_peer", { recipient: "codex-ghost", message: "into the void" });
+  } catch (error) {
+    refusal = String(error.message || error);
+  }
+  assert(refusal !== null, "delivery to a never-opened thread was not refused");
   assert(
-    merged.session_id === "session-new" && merged.mcp_pid === process.pid,
-    `hook clobbered a live MCP stamp: ${JSON.stringify(merged)}`,
+    /no Codex session ever opened/.test(refusal),
+    `refusal did not name the cause: ${refusal}`,
   );
-  pass("SessionStart preserves a live MCP liveness stamp");
+  assert(/Nothing was sent/.test(refusal), `refusal did not say nothing was sent: ${refusal}`);
+  assert(
+    readFileSync(queueLog, "utf8") === queuedBefore,
+    "a message was queued to a thread no session ever opened",
+  );
+  pass("Delivery refuses a thread no Codex session ever opened");
 
   const mistyped = spawnSync(process.execPath, [startPath, "codex", "resume", "--last"], {
     cwd: project,

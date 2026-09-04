@@ -28,6 +28,7 @@ import {
   describeDelivery,
   peekSession,
   describePeek,
+  threadNeverOpened,
 } from "./queue-status.mjs";
 
 const PROJECT_ROOT = resolve(process.env.AGENT_MESH_CWD || process.cwd());
@@ -162,11 +163,20 @@ function registerSelf() {
   try {
     const record = JSON.parse(readFileSync(target, "utf8"));
     if (record.agent_id !== selfId || record.kind !== "codex") return;
-    writeRegistration({
-      ...record,
-      mcp_pid: process.pid,
-      mcp_started_at: new Date().toISOString(),
-    });
+    if (record.mcp_pid !== process.pid) {
+      writeRegistration({
+        ...record,
+        mcp_pid: process.pid,
+        mcp_started_at: new Date().toISOString(),
+      });
+    }
+    // The SessionStart hook rewrites this record after the server connects, and
+    // deliberately drops a stamp belonging to a different session. Re-apply this
+    // server's pid until the record settles, so liveness stays checkable.
+    if (stampAttempts < MAX_STAMP_ATTEMPTS) {
+      stampAttempts += 1;
+      setTimeout(registerSelf, STAMP_RETRY_MS).unref();
+    }
   } catch (error) {
     log("error", "could not stamp Codex registration", String(error));
   }
@@ -268,6 +278,20 @@ function describeQueueFailure(error, stderr) {
 }
 
 function queueToCodex(target, message) {
+  // A failed launch can register its session_id and die, and Codex accepts a
+  // message for that thread exactly as it accepts a live one. Nothing will ever
+  // read it and it cannot be recalled, so refuse rather than lose the message.
+  if (threadNeverOpened(target.session_id)) {
+    return Promise.reject(
+      new Error(
+        `${target.agent_id} is registered on thread ${target.session_id}, which no Codex ` +
+          "session ever opened, so a message queued there could never be read. The agent " +
+          "most likely had a launch fail and leave a stale registration. Ask the human to " +
+          `relaunch it with ./agent-mesh/start codex ${target.agent_id} --resume <session-id>, ` +
+          "then send again. Nothing was sent.",
+      ),
+    );
+  }
   return new Promise((resolveQueue, rejectQueue) => {
     execFile(
       CODEX_BIN,
