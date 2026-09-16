@@ -10,7 +10,7 @@ export function serverOptions(args) {
   for (let i = 0; i < args.length; i += 1) {
     const flag = args[i].split("=")[0];
     if (["--remote", "--remote-auth-token-env", "--profile", "-p", "--worktree", "--cd", "-C"].includes(flag)) {
-      throw new Error(`${flag} is not supported with --mesh-live yet. Launch from the project directory using its default profile.`);
+      throw new Error(`${flag} is not supported with live delivery yet. Launch from the project directory using its default profile, or select --mesh-queue.`);
     }
     if (["-c", "--config", "--enable", "--disable"].includes(flag)) {
       result.push(args[i]);
@@ -51,12 +51,12 @@ async function stop(child, group = false) {
 export async function launchLive({ command, args, cwd, env, onReady }) {
   const options = serverOptions(args);
   if (process.platform !== "linux") {
-    throw new Error("--mesh-live is currently supported on Linux only.");
+    throw new Error("Live delivery is currently supported on Linux only. Use --mesh-queue for the temporary fallback.");
   }
   const version = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 10000, cwd, env });
   const parts = String(version.stdout).match(/(\d+)\.(\d+)\.(\d+)/);
   if (!parts || (Number(parts[1]) === 0 && Number(parts[2]) < 154)) {
-    throw new Error("--mesh-live requires Codex CLI 0.154.0 or newer (tested with 0.154.0).");
+    throw new Error("Live delivery requires Codex CLI 0.154.0 or newer (tested with 0.154.0). Update Codex or use --mesh-queue (requires 0.149.0+).");
   }
   const directory = mkdtempSync(join(tmpdir(), "agent-mesh-live-"));
   const socket = join(directory, "control.sock");

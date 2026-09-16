@@ -152,7 +152,8 @@ test("Unix WebSocket transport correlates replies, ignores approvals, and times 
   }
 });
 
-test("live launcher shares identity and socket with terminal and hook, then cleans up", async () => {
+for (const resuming of [false, true]) {
+test(`default live launcher ${resuming ? "resumes" : "bootstraps"}, shares identity, and cleans up`, async () => {
   const directory = mkdtempSync(join(tmpdir(), "mesh-launch-test-"));
   const fake = join(directory, "codex.mjs");
   const log = join(directory, "launch.jsonl");
@@ -178,7 +179,7 @@ if(args.includes('app-server')) {
  }
 }
 `, { mode: 0o755 });
-  const child = spawn(process.execPath, [join(here, "start"), "codex", "live-a", "--mesh-live", "--resume", "live-session"], {
+  const child = spawn(process.execPath, [join(here, "start"), "codex", "live-a", ...(resuming ? ["--resume", "live-session"] : [])], {
     cwd: directory, env: { ...process.env, AGENT_MESH_CWD: directory, AGENT_MESH_CODEX_BIN: fake, TEST_LOG: log },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -193,7 +194,9 @@ if(args.includes('app-server')) {
     assert.equal(backend.id, "live-a");
     assert.equal(terminal.id, "live-a");
     assert.equal(backend.socket, terminal.socket);
-    assert.deepEqual(terminal.args, ["--remote", `unix://${backend.socket}`, "--no-alt-screen", "resume", "live-session"]);
+    assert.deepEqual(terminal.args.slice(0, 3), ["--remote", `unix://${backend.socket}`, "--no-alt-screen"]);
+    if (resuming) assert.deepEqual(terminal.args.slice(3), ["resume", "live-session"]);
+    else assert.match(terminal.args[3], /^Agent-mesh bootstrap:/);
     const record = JSON.parse(readFileSync(join(directory, ".agent-mesh/sessions/live-a.json")));
     assert.equal(record.app_server_socket, backend.socket);
     assert.equal(record.session_id, "live-session");
@@ -211,6 +214,20 @@ if(args.includes('app-server')) {
     clearTimeout(timer);
     child.kill("SIGTERM");
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+}
+
+test("transport flags reject conflicts and Claude usage before launching", () => {
+  const launcher = fileURLToPath(new URL("start", import.meta.url));
+  for (const args of [
+    ["codex", "test-agent", "--mesh-live", "--mesh-queue"],
+    ["claude", "test-agent", "--mesh-queue"],
+    ["claude", "test-agent", "--mesh-live"],
+  ]) {
+    const result = spawnSync(process.execPath, [launcher, ...args], { encoding: "utf8" });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /not both|only supported for Codex/);
   }
 });
 

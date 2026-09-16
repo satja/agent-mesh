@@ -146,6 +146,8 @@ class McpProcess {
         AGENT_MESH_CODEX_BIN: fakeCodex,
         AGENT_MESH_TEST_QUEUE_LOG: queueLog,
         AGENT_MESH_CODEX_LOCKS: threadLocks,
+        // Synthetic peer IDs should never scan the user's real session history.
+        AGENT_MESH_CODEX_SESSIONS: join(project, "codex-sessions"),
         ...extraEnv,
       },
       stdio: ["pipe", "pipe", "pipe"],
@@ -245,7 +247,7 @@ try {
     JSON.stringify({ mcpServers: { "agent-mesh": { command: "node" } } }),
   );
   writeFileSync(join(project, ".codex", "config.toml"), "[mcp_servers.agent-mesh]\n");
-  const launch = spawnSync(process.execPath, [startPath, "codex", "codex-launch"], {
+  const launch = spawnSync(process.execPath, [startPath, "codex", "codex-launch", "--mesh-queue"], {
     cwd: project,
     encoding: "utf8",
     env: {
@@ -262,7 +264,7 @@ try {
     launchData.args.at(-1).startsWith("Agent-mesh bootstrap:"),
     "automatic bootstrap prompt missing",
   );
-  pass("Codex launcher identity and automatic bootstrap turn");
+  pass("Codex queue fallback identity and automatic bootstrap turn");
 
   registerCodex("codex-a", "session-a");
   registerCodex("codex-b", "session-b");
@@ -478,7 +480,7 @@ try {
 
   // Resuming outside the launcher loses AGENT_MESH_*, so the launcher has to own
   // resume for both agents: Codex takes a subcommand, Claude takes a flag.
-  const codexResume = launchArgs("codex", "codex-resume", ["--resume", "--last"], fakeLauncherCodex);
+  const codexResume = launchArgs("codex", "codex-resume", ["--mesh-queue", "--resume", "--last"], fakeLauncherCodex);
   assert(
     codexResume[0] === "--no-alt-screen" &&
       codexResume[1] === "resume" &&

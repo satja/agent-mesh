@@ -35,18 +35,16 @@ so explicitly: agents are told to evaluate peer claims independently, to push
 back with evidence rather than defer to keep the peace, and to bring a genuine
 disagreement to you rather than paper over it.
 
-Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Codex recipients use native `codex queue` by default, or opt-in live app-server delivery; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
+Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Codex recipients use live app-server delivery by default, with `--mesh-queue` available as a temporary fallback; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
 
-In default queue mode, a Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently, and `check_inbox` lets an agent discover mid-task that peers are waiting on it.
+In queue fallback mode, a Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently, and `check_inbox` lets an agent discover mid-task that peers are waiting on it.
 
 ## Requirements
 
 - Node.js 20 or newer
 - npm
-- Codex CLI **0.149.0 or newer** for Codex sessions. Delivery to a Codex
-  recipient uses `codex queue`, which earlier versions do not provide; on an
-  older CLI a Codex agent can still send, but messages addressed to it fail.
-  The launcher warns at startup and `send_peer` reports the detected version.
+- Codex CLI **0.154.0 or newer on Linux** for default live delivery.
+  The temporary `--mesh-queue` fallback requires **0.149.0 or newer**.
 - Claude Code for Claude sessions
 
 ## Install into a project
@@ -141,13 +139,13 @@ registrations and send to them while nothing can address it. Look for
 `"source":"session-hook"` entries in `.agent-mesh/agent-mesh.log` to see whether
 the hook ran and why it declined to register.
 
-## Opt-in live Codex delivery
+## Live Codex delivery (default)
 
 With **Codex CLI 0.154.0 or newer on Linux**, launch a recipient with:
 
 ```sh
-./agent-mesh/start codex codex-a --mesh-live
-./agent-mesh/start codex codex-a --mesh-live --resume <session-id>
+./agent-mesh/start codex codex-a
+./agent-mesh/start codex codex-a --resume <session-id>
 ```
 
 You still use the normal Codex terminal. The launcher starts a dedicated local
@@ -168,14 +166,23 @@ replied. A timeout or lost connection after submission reports an unknown outcom
 and does not resend through the queue. Inspect the recipient before retrying.
 `check_inbox` covers legacy queued messages only.
 
-This mode is experimental and opt-in, tested against **0.154.0**. Launch from the
+Live delivery is the default, tested against **0.154.0**; Codex's app-server
+transport remains experimental. Launch from the
 installed project directory; `--profile`, `--cd`, `--worktree`, and custom
 `--remote` options are currently rejected in live mode. Configuration overrides
 using `-c`, `--config`, `--enable`, and `--disable` are also passed to the backend.
 Backend diagnostics go to `.agent-mesh/<agent-id>-app-server.log`.
 
-To return to queue mode, close the session and resume through the launcher
-without `--mesh-live`. Claude's launcher and inbound channel delivery are unchanged.
+To use the temporary queue fallback, close the session and resume with:
+
+```sh
+./agent-mesh/start codex codex-a --mesh-queue --resume <session-id>
+```
+
+For a new queue-mode session, use `./agent-mesh/start codex codex-a --mesh-queue`.
+The launcher never silently falls back if live startup fails. `--mesh-live` remains
+a supported explicit alias for the default; combining it with `--mesh-queue` is
+an error. Claude's launcher and inbound channel delivery are unchanged.
 Existing installations need the installer rerun to copy the new modules and
 install their WebSocket dependency.
 
@@ -203,7 +210,7 @@ Agent messages arrive with a structural envelope:
 
 The receiving agent answers the human normally and answers another agent through `send_peer`. This separation means a Codex final response no longer needs a marker, and Claude does not need UI keystrokes or `@name` routing.
 
-## Default queue delivery waits for a turn boundary
+## Queue fallback delivery waits for a turn boundary
 
 `codex queue` accepts a message into the recipient's queue immediately, but a Codex session only reads its queue between turns. A peer running a long task does not see the message until that task finishes, and a message addressed to a thread whose session has exited is accepted and never read at all. Codex reports both cases identically, so `send_peer` checks the recipient's own session log and reports which happened:
 
@@ -228,7 +235,7 @@ peek_peer(agent_id="codex-b")
 
 which reports whether that session is working or idle, how long its current or last turn has run, any error it ended on, and its recent activity.
 
-In default queue mode the limit is symmetric, so an agent cannot receive while it is working either. `check_inbox` lets it find out mid-task that someone is waiting:
+In queue fallback mode the limit is symmetric, so an agent cannot receive while it is working either. `check_inbox` lets it find out mid-task that someone is waiting:
 
 ```text
 2 message(s) waiting for you, and they will arrive at your next turn boundary.
@@ -268,7 +275,7 @@ The generated `.agent-mesh/` directory contains session registrations, the Claud
 
 ## Compatibility and scope
 
-Default queue mode drives Codex through its own CLI and reads its local session state:
+Queue fallback mode drives Codex through its own CLI and reads its local session state:
 `codex queue` for delivery, the rollout JSONL under `~/.codex/sessions` to tell
 a delivered message from a merely queued one, and the writer locks under
 `~/.codex/thread-writer-locks` to reject a thread no session ever opened. None

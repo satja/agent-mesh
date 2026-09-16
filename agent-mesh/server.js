@@ -452,7 +452,7 @@ const instructions =
   "Messages beginning with '[From <kind> agent: <id> via agent-mesh]' came from another agent. " +
   "Use send_peer for every agent-directed response; an ordinary assistant response is only for the human user. " +
   "Continue substantive exchanges when collaboration is requested, but avoid acknowledgment-only loops. " +
-  "Codex peers launched with --mesh-live accept messages during an active turn via turn/steer, " +
+  "Codex peers use live delivery by default and accept messages during an active turn via turn/steer, " +
   "or start a new turn when idle. Acceptance does not mean the model has read or answered it. " +
   "Legacy Codex peers use a queue read between turns; send_peer reports consumption separately. " +
   "Never re-send an accepted, queued, or delivery-unknown message: that can duplicate work. " +

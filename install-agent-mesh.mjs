@@ -18,8 +18,8 @@ const skipNpm = process.argv.includes("--skip-npm");
 const sectionName = "agent-mesh-routing";
 const legacySectionName = "agent-bridge-routing";
 const hookCommand = "node ./agent-mesh/session-hook.js";
-// Delivery to a Codex recipient shells out to `codex queue`, added in 0.149.0.
-const minCodexVersion = "0.149.0";
+// Default live delivery is tested against Codex 0.154.0.
+const minCodexVersion = "0.154.0";
 const legacyHookCommands = new Set([
   "node ./codex-bridge/codex-hook.js",
   "node ./codex-peer/session-hook.js",
@@ -34,7 +34,7 @@ This project can run multiple Codex and Claude Code sessions through the local \
 - Send every agent-directed message with the \`agent-mesh\` tool \`send_peer\`. Supply \`recipient\` whenever more than one other agent is registered. Use \`*\` only when an actual broadcast is intended.
 - An ordinary assistant response is addressed only to the human. Printing a peer reply in the terminal does not send it; call \`send_peer\`.
 - Do not call \`codex queue\` directly or read/write \`.agent-mesh\` runtime files. The mesh owns routing, exact session IDs, attribution, and recipient filtering.
-- Codex peers launched with --mesh-live accept peer messages during an active turn, or start a turn when idle. Legacy Codex peers read queued messages only between turns, which can take many minutes.
+- Codex peers use live delivery by default and accept peer messages during an active turn, or start a turn when idle. Codex peers launched with --mesh-queue read queued messages only between turns, which can take many minutes.
 - \`send_peer\` reports which happened: \`Delivered\` means the peer consumed the message and can see it; \`QUEUED, NOT YET DELIVERED\` means it is waiting for the peer's next turn boundary. Neither means the peer has answered.
 - Live delivery reports acceptance, not model attention or a reply. Never resend an accepted message or one with an unknown delivery outcome.
 - A queued message cannot be cancelled or edited. Re-sending does not replace it, it queues a duplicate. If you got \`QUEUED\`, wait.
@@ -67,9 +67,9 @@ function warnOnOldCodex() {
     if (found[index] === required[index]) continue;
     if (found[index] > required[index]) return;
     process.stderr.write(
-      `\nWARNING: ${reported} predates Codex CLI ${minCodexVersion}, which introduced\n` +
-        "`codex queue`. Messages addressed TO a Codex agent will fail to deliver\n" +
-        "until Codex is updated (`codex update`). Outbound messages still work.\n\n",
+      `\nWARNING: ${reported} predates Codex CLI ${minCodexVersion}, required for live delivery.\n` +
+        "Update Codex, or launch with --mesh-queue for the temporary fallback\n" +
+        "(requires Codex CLI 0.149.0 or newer).\n\n",
     );
     return;
   }
