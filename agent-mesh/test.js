@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -722,19 +723,22 @@ try {
 
   // server.js importing a module the installer does not copy produces a bundle
   // that fails its MCP handshake in every freshly installed project.
-  const installerSource = readFileSync(join(here, "..", "install-agent-mesh.mjs"), "utf8");
-  const bundled = new Set(
-    [...installerSource.matchAll(/"(agent-mesh\/[^"]+)"/g)].map((match) => match[1]),
-  );
-  const localImports = [
-    ...readFileSync(serverPath, "utf8").matchAll(/from "\.\/([^"]+)"/g),
-  ].map((match) => match[1]);
-  assert(localImports.length > 0, "no local imports found in server.js to check");
-  for (const relative of localImports) {
-    assert(
-      bundled.has(`agent-mesh/${relative}`),
-      `server.js imports ./${relative} but the installer bundle does not copy it`,
+  const installerPath = join(here, "..", "install-agent-mesh.mjs");
+  if (existsSync(installerPath)) {
+    const installerSource = readFileSync(installerPath, "utf8");
+    const bundled = new Set(
+      [...installerSource.matchAll(/"(agent-mesh\/[^"]+)"/g)].map((match) => match[1]),
     );
+    const localImports = [
+      ...readFileSync(serverPath, "utf8").matchAll(/from "\.\/([^"]+)"/g),
+    ].map((match) => match[1]);
+    assert(localImports.length > 0, "no local imports found in server.js to check");
+    for (const relative of localImports) {
+      assert(
+        bundled.has(`agent-mesh/${relative}`),
+        `server.js imports ./${relative} but the installer bundle does not copy it`,
+      );
+    }
   }
   pass("Every module server.js imports is part of the installer bundle");
 

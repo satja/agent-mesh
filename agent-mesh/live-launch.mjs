@@ -50,8 +50,8 @@ async function stop(child, group = false) {
 // A dedicated backend preserves AGENT_MESH_ID for hooks and MCP subprocesses.
 export async function launchLive({ command, args, cwd, env, onReady }) {
   const options = serverOptions(args);
-  if (process.platform !== "linux") {
-    throw new Error("Live delivery is currently supported on Linux only. Use --mesh-queue for the temporary fallback.");
+  if (process.platform === "win32") {
+    throw new Error("Live delivery currently requires a Unix socket. Use --mesh-queue on Windows.");
   }
   const version = spawnSync(command, ["--version"], { encoding: "utf8", timeout: 10000, cwd, env });
   const parts = String(version.stdout).match(/(\d+)\.(\d+)\.(\d+)/);
@@ -101,7 +101,7 @@ export async function launchLive({ command, args, cwd, env, onReady }) {
       throw backendError || new Error(`Codex app-server did not become ready. See ${logPath}`);
     }
     onReady(socket);
-    process.stdout.write("Live mesh delivery enabled (steer while busy, start while idle).\n");
+    process.stdout.write("Live mesh delivery enabled through the Codex Python SDK ExternalMessage API.\n");
     terminal = spawn(command, ["--remote", `unix://${socket}`, ...args], {
       cwd, env: childEnv, stdio: "inherit",
     });

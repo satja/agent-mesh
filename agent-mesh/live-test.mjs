@@ -9,111 +9,52 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { AppServerClient, deliverLive, RpcError } from "./app-server.mjs";
+import { AppServerClient, sendToAppServer } from "./app-server.mjs";
 import { serverOptions } from "./live-launch.mjs";
 
-const snapshot = (state, id = "turn-a") => ({ thread: {
-  status: { type: state }, turns: state === "active" ? [{ id, status: "inProgress" }] : [],
-} });
-
-function scripted(steps) {
-  const calls = [];
-  return {
-    calls,
-    async request(method, params) {
-      // Serve the preliminary metadata read without consuming a scripted history read.
-      if (method === "thread/read" && !params.includeTurns && steps[0]?.[1]?.thread?.status?.type === "active") return steps[0][1];
-      calls.push({ method, params });
-      const step = steps.shift();
-      assert.ok(step, `Unexpected ${method}`);
-      assert.equal(method, step[0]);
-      if (step[1] instanceof Error) throw step[1];
-      return step[1];
-    },
-  };
-}
-
-test("busy delivery steers the exact active turn without changing policy", async () => {
-  const client = scripted([["thread/read", snapshot("active")], ["turn/steer", { turnId: "turn-a" }]]);
-  assert.deepEqual(await deliverLive(client, "thread-a", "hello"), { method: "turn/steer", turnId: "turn-a" });
-  assert.deepEqual(client.calls[1].params, {
-    threadId: "thread-a", expectedTurnId: "turn-a", input: [{ type: "text", text: "hello" }],
-  });
-});
-
-test("idle delivery starts a turn without overriding recipient configuration", async () => {
-  const client = scripted([["thread/read", snapshot("idle")], ["turn/start", { turn: { id: "turn-b" } }]]);
-  await deliverLive(client, "thread-a", "hello");
-  assert.deepEqual(client.calls[1].params, { threadId: "thread-a", input: [{ type: "text", text: "hello" }] });
-});
-
-test("busy-to-idle race refreshes only after explicit rejection", async () => {
-  const client = scripted([
-    ["thread/read", snapshot("active")],
-    ["turn/steer", new RpcError({ code: -32600, message: "no active turn" })],
-    ["thread/read", snapshot("idle")], ["turn/start", { turn: { id: "turn-b" } }],
-  ]);
-  assert.equal((await deliverLive(client, "thread-a", "hello")).method, "turn/start");
-});
-
-test("changed active turn is refreshed instead of reusing a stale ID", async () => {
-  const client = scripted([
-    ["thread/read", snapshot("active")],
-    ["turn/steer", new RpcError({ code: -32600, message: "expected active turn id `turn-a` but found `turn-b`" })],
-    ["thread/read", snapshot("active", "turn-b")], ["turn/steer", { turnId: "turn-b" }],
-  ]);
-  await deliverLive(client, "thread-a", "hello");
-  assert.equal(client.calls[3].params.expectedTurnId, "turn-b");
-});
-
-test("turn ending between metadata and history reads is delivered with start", async () => {
-  const client = { async request(method, params) {
-    if (method === "thread/read") return snapshot(params.includeTurns ? "idle" : "active");
-    assert.equal(method, "turn/start");
-    return { turn: { id: "turn-b" } };
-  } };
-  assert.equal((await deliverLive(client, "thread-a", "hello")).method, "turn/start");
-});
-
-test("unknown delivery outcomes and non-race rejections never resend", async () => {
-  for (const state of ["active", "idle"]) {
-    for (const error of [new Error("connection lost"), new RpcError({ code: -32600, message: "permission denied" })]) {
-      const client = scripted([["thread/read", snapshot(state)], [state === "active" ? "turn/steer" : "turn/start", error]]);
-      await assert.rejects(deliverLive(client, "thread-a", "hello"), error instanceof RpcError ? /permission denied/ : /outcome unknown.*Do not re-send/);
-      assert.equal(client.calls.length, 2);
+test("live delivery delegates one exact message to the Python SDK helper", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mesh-sdk-helper-"));
+  const helper = join(directory, "python");
+  const log = join(directory, "request.json");
+  writeFileSync(helper, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+let body='';
+process.stdin.on('data',chunk=>body+=chunk);
+process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({delivery:'joined',turnId:'turn-a'}));});
+`, { mode: 0o755 });
+  try {
+    const previous = process.env.TEST_LOG;
+    process.env.TEST_LOG = log;
+    try {
+      assert.deepEqual(await sendToAppServer({
+        socket: "/tmp/codex.sock", threadId: "thread-a", text: "hello", python: helper,
+      }), { delivery: "joined", turnId: "turn-a" });
+    } finally {
+      if (previous === undefined) delete process.env.TEST_LOG;
+      else process.env.TEST_LOG = previous;
     }
+    assert.deepEqual(JSON.parse(readFileSync(log, "utf8")), {
+      socket: "/tmp/codex.sock", threadId: "thread-a", content: "hello",
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("unloaded threads are never resumed or started behind the terminal", async () => {
-  const client = scripted([["thread/read", snapshot("notLoaded")]]);
-  await assert.rejects(deliverLive(client, "thread-a", "hello"), /Nothing was sent/);
-  assert.equal(client.calls.length, 1);
+test("helper failures are never retried or silently queued", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mesh-sdk-failure-"));
+  const helper = join(directory, "python");
+  writeFileSync(helper, "#!/bin/sh\necho 'connection lost' >&2\nexit 1\n", { mode: 0o755 });
+  try {
+    await assert.rejects(sendToAppServer({
+      socket: "/tmp/codex.sock", threadId: "thread-a", text: "hello", python: helper,
+    }), /outcome unknown.*Do not re-send/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
-test("unsupported active history falls back to atomic start-or-steer without queueing", async () => {
-  const calls = [];
-  const client = { async request(method, params) {
-    calls.push({ method, params });
-    if (method === "thread/read" && !params.includeTurns) {
-      return { thread: { status: { type: "active" }, turns: [] } };
-    }
-    if (method === "thread/read") throw new RpcError({ code: -32601, message: "list_turns is not supported yet" });
-    assert.equal(method, "turn/start");
-    return { turn: { id: "turn-a" } };
-  } };
-  assert.deepEqual(await deliverLive(client, "thread-a", "hello"), { method: "turn/start", turnId: "turn-a" });
-  assert.equal(calls.length, 3);
-});
-
-test("repeated turn races stop after a bounded number of attempts", async () => {
-  const steps = Array.from({ length: 3 }, () => [
-    ["thread/read", snapshot("active")], ["turn/steer", new RpcError({ code: -32600, message: "no active turn" })],
-  ]).flat();
-  const client = scripted(steps);
-  await assert.rejects(deliverLive(client, "thread-a", "hello"), /not accepted/);
-  assert.equal(client.calls.length, 6);
-});
+const snapshot = (state) => ({ thread: { status: { type: state } } });
 
 test("live launcher forwards backend configuration and rejects unsupported launch modes", () => {
   assert.deepEqual(serverOptions(["--no-alt-screen", "-c", "model=\"test\"", "--enable=hooks", "--strict-config", "--model", "test"]),
@@ -121,7 +62,7 @@ test("live launcher forwards backend configuration and rejects unsupported launc
   for (const flag of ["--remote", "--worktree", "--profile", "-C"]) assert.throws(() => serverOptions([flag]), /not supported/);
 });
 
-test("Unix WebSocket transport correlates replies, ignores approvals, and times out without retry", async () => {
+test("Unix WebSocket transport correlates replies and ignores approval requests", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mesh-ws-test-"));
   const socket = join(directory, "control.sock");
   const http = createServer();
@@ -135,14 +76,13 @@ test("Unix WebSocket transport correlates replies, ignores approvals, and times 
       peer.send(JSON.stringify({ method: "turn/completed", params: {} }));
       peer.send(JSON.stringify({ id: message.id, result: snapshot("idle") }));
     }
-    // Intentionally lose the turn/start response after accepting the request.
   }));
   await new Promise((resolve) => http.listen(socket, resolve));
   const client = new AppServerClient({ socket, timeoutMs: 100 });
   try {
     await client.initialize();
-    await assert.rejects(deliverLive(client, "thread-a", "hello"), /outcome unknown/);
-    assert.deepEqual(seen.map((x) => x.method), ["initialize", "initialized", "thread/read", "turn/start"]);
+    assert.deepEqual(await client.request("thread/read", { threadId: "thread-a", includeTurns: false }), snapshot("idle"));
+    assert.deepEqual(seen.map((x) => x.method), ["initialize", "initialized", "thread/read"]);
   } finally {
     client.close();
     for (const peer of ws.clients) peer.terminate();
@@ -234,42 +174,47 @@ test("transport flags reject conflicts and Claude usage before launching", () =>
 test("Claude send_peer selects live Codex delivery and records the message once", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mesh-live-mcp-"));
   const socket = join(directory, "control.sock");
+  const helper = join(directory, "python");
+  const helperLog = join(directory, "external-message.json");
   const sessions = join(directory, ".agent-mesh/sessions");
   mkdirSync(sessions, { recursive: true });
   writeFileSync(join(sessions, "codex-live.json"), JSON.stringify({
     agent_id: "codex-live", kind: "codex", session_id: "thread-a", cwd: directory,
     mcp_pid: process.pid, app_server_socket: socket,
   }));
-  const http = createServer();
-  const ws = new WebSocketServer({ server: http });
-  const requests = [];
-  ws.on("connection", (peer) => peer.on("message", (data) => {
-    const m = JSON.parse(data); requests.push(m);
-    if (!m.id) return;
-    const result = m.method === "thread/read" ? snapshot("idle") : m.method === "turn/start" ? { turn: { id: "turn-new" } } : {};
-    peer.send(JSON.stringify({ id: m.id, result }));
-  }));
-  await new Promise((resolve) => http.listen(socket, resolve));
+  writeFileSync(helper, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+let body='';process.stdin.on('data',chunk=>body+=chunk);
+process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({delivery:'started',turnId:'turn-new'}));});
+`, { mode: 0o755 });
   const client = new Client({ name: "mesh-test", version: "1" });
   const transport = new StdioClientTransport({
     command: process.execPath, args: [fileURLToPath(new URL("server.js", import.meta.url))], cwd: directory,
-    env: { ...process.env, AGENT_MESH_CWD: directory, AGENT_MESH_ID: "claude-source", AGENT_MESH_KIND: "claude", AGENT_MESH_CODEX_BIN: "/no-queue-fallback" },
+    env: {
+      ...process.env,
+      AGENT_MESH_CWD: directory,
+      AGENT_MESH_ID: "claude-source",
+      AGENT_MESH_KIND: "claude",
+      AGENT_MESH_CODEX_BIN: "/no-queue-fallback",
+      AGENT_MESH_PYTHON_BIN: helper,
+      TEST_LOG: helperLog,
+    },
   });
   try {
     await client.connect(transport);
     const result = await client.callTool({ name: "send_peer", arguments: { recipient: "codex-live", message: "live hello" } });
-    assert.match(result.content[0].text, /Accepted by Codex via turn\/start/);
-    assert.equal(requests.filter((r) => r.method === "turn/start").length, 1);
-    assert.equal(requests.at(-1).params.input[0].text, "[From claude agent: claude-source via agent-mesh]\n\nlive hello");
+    assert.match(result.content[0].text, /Python SDK ExternalMessage API/);
+    assert.deepEqual(JSON.parse(readFileSync(helperLog, "utf8")), {
+      socket,
+      threadId: "thread-a",
+      content: "[From claude agent: claude-source via agent-mesh]\n\nlive hello",
+    });
     const ledger = readFileSync(join(directory, ".agent-mesh/messages.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].transport, "codex-app-server");
     assert.equal(ledger[0].message, "live hello");
   } finally {
     await client.close();
-    for (const peer of ws.clients) peer.terminate();
-    await new Promise((resolve) => ws.close(resolve));
-    await new Promise((resolve) => http.close(resolve));
     rmSync(directory, { recursive: true, force: true });
   }
 });

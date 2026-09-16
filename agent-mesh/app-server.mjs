@@ -1,3 +1,7 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 
 export class RpcError extends Error {
@@ -82,50 +86,70 @@ export class AppServerClient {
   }
 }
 
-export async function deliverLive(client, threadId, text) {
-  const input = [{ type: "text", text }];
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let { thread } = await client.request("thread/read", { threadId, includeTurns: false });
-    // A fresh 0.154 thread can reject history reads before its first turn.
-    if (thread.status?.type === "active") {
-      try {
-        ({ thread } = await client.request("thread/read", { threadId, includeTurns: true }));
-      } catch (error) {
-        // Some 0.154 paginated threads cannot hydrate history. turn/start
-        // atomically steers an active turn too (verified against 0.154).
-        if (!(error instanceof RpcError) || error.code !== -32601) throw error;
-      }
-    }
-    const state = thread.status?.type;
-    if (state !== "active" && state !== "idle") {
-      throw new Error(`Recipient thread is ${state || "unknown"}; relaunch its mesh terminal. Nothing was sent.`);
-    }
-    const active = thread.turns?.findLast((turn) => turn.status === "inProgress");
-    const method = state === "active" && active ? "turn/steer" : "turn/start";
-    try {
-      const result = await client.request(method, {
-        threadId, input,
-        ...(method === "turn/steer" ? { expectedTurnId: active.id } : {}),
-      });
-      return { method, turnId: result.turnId || result.turn?.id };
-    } catch (error) {
-      // Only an explicit precondition rejection proves that retrying is safe.
-      if (method === "turn/steer" && error instanceof RpcError &&
-          /no active turn|expected active turn id .* but found |turn.*mismatch/i.test(error.message)) continue;
-      if (error instanceof RpcError) throw error;
-      throw new Error(`Delivery outcome unknown after ${method}: ${error.message}. Do not re-send or queue a duplicate; inspect the recipient first.`);
-    }
+const here = dirname(fileURLToPath(import.meta.url));
+
+function pythonExecutable() {
+  if (process.env.AGENT_MESH_PYTHON_BIN) return process.env.AGENT_MESH_PYTHON_BIN;
+  const local = process.platform === "win32"
+    ? join(here, ".venv", "Scripts", "python.exe")
+    : join(here, ".venv", "bin", "python");
+  if (!existsSync(local)) {
+    throw new Error(`Codex Python SDK environment is missing at ${local}; rerun the agent-mesh installer.`);
   }
-  throw new Error("Recipient turn changed repeatedly. Message was not accepted; try again later.");
+  return local;
 }
 
-export async function sendToAppServer({ socket, threadId, text }) {
-  // Return before the mesh MCP tool's 30-second timeout, including race retries.
-  const client = new AppServerClient({ socket, deadline: Date.now() + 20000 });
-  try {
-    await client.initialize();
-    return await deliverLive(client, threadId, text);
-  } finally {
-    client.close();
-  }
+export function sendToAppServer({ socket, threadId, text, python = pythonExecutable() }) {
+  const script = join(here, "external-message.py");
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, [script], {
+      cwd: here,
+      env: { ...process.env, AGENT_MESH_NODE_BIN: process.execPath },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error(
+        "Delivery outcome unknown after ExternalMessage timed out" +
+        (stderr.trim() ? `: ${stderr.trim()}` : "") +
+        ". Do not re-send or queue a duplicate; inspect the recipient first.",
+      )));
+    }, 20000);
+    child.stdout.on("data", (chunk) => { stdout = (stdout + chunk).slice(-10000); });
+    child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-10000); });
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("exit", (code) => finish(() => {
+      if (code !== 0) {
+        const detail = stderr.trim() || `Python helper exited with status ${code}`;
+        if (/failed to submit turn input/i.test(detail) || /Nothing was sent/i.test(detail)) {
+          reject(new Error(detail));
+        } else {
+          reject(new Error(
+            `Delivery outcome unknown after ExternalMessage: ${detail}. ` +
+            "Do not re-send or queue a duplicate; inspect the recipient first.",
+          ));
+        }
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout.trim());
+        if (!result.turnId || !["joined", "started"].includes(result.delivery)) {
+          throw new Error("invalid result shape");
+        }
+        resolve(result);
+      } catch (error) {
+        reject(new Error(`ExternalMessage helper returned invalid output: ${error.message}`));
+      }
+    }));
+    child.stdin.end(JSON.stringify({ socket, threadId, content: text }));
+  });
 }

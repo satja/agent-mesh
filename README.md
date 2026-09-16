@@ -35,6 +35,11 @@ so explicitly: agents are told to evaluate peer claims independently, to push
 back with evidence rather than defer to keep the peace, and to bring a genuine
 disagreement to you rather than paper over it.
 
+Live Codex recipients receive peer content through the public Python SDK
+`ExternalMessage` interface. The SDK gives it tool-level authority, below user
+and developer instructions, so a peer cannot present its text as something the
+human typed or use it to grant approval.
+
 Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Codex recipients use live app-server delivery by default, with `--mesh-queue` available as a temporary fallback; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
 
 In queue fallback mode, a Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently, and `check_inbox` lets an agent discover mid-task that peers are waiting on it.
@@ -43,7 +48,8 @@ In queue fallback mode, a Codex session reads a queued message only between its 
 
 - Node.js 20 or newer
 - npm
-- Codex CLI **0.154.0 or newer on Linux** for default live delivery.
+- Python 3.10 or newer on macOS or Linux for the Codex Python SDK
+- Codex CLI **0.154.0 or newer** for default live delivery.
   The temporary `--mesh-queue` fallback requires **0.149.0 or newer**.
 - Claude Code for Claude sessions
 
@@ -56,7 +62,9 @@ cd /path/to/your-project
 node /path/to/agent-mesh/install-agent-mesh.mjs
 ```
 
-The installer copies the runtime into the project, installs its Node dependencies, runs the transport tests, and safely merges:
+The installer copies the runtime into the project, installs its Node dependencies
+and a project-local `openai-codex==0.154.0` Python environment, runs the transport
+tests, and safely merges:
 
 - `.mcp.json` for Claude Code
 - `.codex/config.toml` for Codex
@@ -141,7 +149,7 @@ the hook ran and why it declined to register.
 
 ## Live Codex delivery (default)
 
-With **Codex CLI 0.154.0 or newer on Linux**, launch a recipient with:
+With **Codex CLI 0.154.0 or newer on macOS or Linux**, launch a recipient with:
 
 ```sh
 ./agent-mesh/start codex codex-a
@@ -154,19 +162,25 @@ Unix socket for the mesh. No extra terminal, port selection, or manual daemon
 management is needed. Closing the terminal stops its backend. Each backend
 inherits that agent's mesh identity and environment.
 
-Messages from either Claude or Codex then use `turn/steer` while the recipient
-is busy and `turn/start` while idle, without interrupting its work. If the turn
-changes before steering arrives, the mesh refreshes the state after an explicit
-rejection. `turn/start` also accepts input for a turn that became active in the
-meantime; this is also the compatibility path when Codex cannot expose the
-active turn's history. The mesh never calls `turn/interrupt`.
+Messages from either Claude or Codex are submitted directly as
+`openai_codex.ExternalMessage` objects. The SDK starts a turn when the recipient
+is idle or joins its active regular turn atomically. Peer content is stored as a
+function-call output with tool-level authority; it is never submitted as user
+input. The mesh no longer chooses between `turn/steer` and `turn/start`, and it
+never calls `turn/interrupt`.
+
+The Node transport starts the SDK helper from `agent-mesh/.venv` and bridges its
+stdio connection to the same private app-server WebSocket used by the visible
+terminal. This keeps the public Python API as the source of the message shape
+while preserving live delivery to the terminal's active thread.
 
 Live delivery reports **acceptance**, not that the model has read the message or
 replied. A timeout or lost connection after submission reports an unknown outcome
 and does not resend through the queue. Inspect the recipient before retrying.
 `check_inbox` covers legacy queued messages only.
 
-Live delivery is the default, tested against **0.154.0**; Codex's app-server
+Live delivery is the default, tested against **Python SDK and CLI 0.154.0**.
+`ExternalMessage` is a stable public SDK interface; the shared app-server
 transport remains experimental. Launch from the
 installed project directory; `--profile`, `--cd`, `--worktree`, and custom
 `--remote` options are currently rejected in live mode. Configuration overrides
@@ -184,7 +198,8 @@ The launcher never silently falls back if live startup fails. `--mesh-live` rema
 a supported explicit alias for the default; combining it with `--mesh-queue` is
 an error. Claude's launcher and inbound channel delivery are unchanged.
 Existing installations need the installer rerun to copy the new modules and
-install their WebSocket dependency.
+install the Python SDK and WebSocket dependency. On Windows, use `--mesh-queue`;
+the shared live transport currently requires a Unix socket.
 
 ## Use it
 
@@ -287,6 +302,11 @@ check. Requires Codex 0.149.0 or newer for `codex queue` at all.
 Process ancestry in the SessionStart hook reads `/proc`, so identity resolution
 falls back to a less precise path on macOS when several agents start at once.
 
+Live delivery uses the public `ExternalMessage` class rather than reproducing
+its wire representation in this project. The SDK currently resumes the target
+thread before submitting the message, so a deliberately unbootstrapped fresh
+session must complete one ordinary turn before it can receive live peer input.
+
 `peek_peer` reads another local session's rollout to report whether it is
 working, what it ran recently, and any error it ended on. Every session here
 belongs to the same person on the same machine, but be aware that agents can
@@ -296,6 +316,8 @@ see that much about each other.
 
 ```sh
 npm --prefix agent-mesh ci
+python3 -m venv agent-mesh/.venv
+agent-mesh/.venv/bin/python -m pip install -r agent-mesh/requirements.txt
 npm --prefix agent-mesh test
 ```
 

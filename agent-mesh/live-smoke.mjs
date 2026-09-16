@@ -93,23 +93,38 @@ try {
   const { thread } = await terminal.request("thread/start", {
     cwd: directory, model: "gpt-5.4", approvalPolicy: "on-request", sandbox: "read-only",
   });
+  // The public SDK resumes an existing persisted thread. Establish the same
+  // initial rollout that the mesh launcher's automatic bootstrap creates.
+  const bootstrap = await terminal.request("turn/start", {
+    threadId: thread.id, input: [{ type: "text", text: "Bootstrap smoke thread" }],
+  });
+  await waitFor(() => requests.length === 1, "bootstrap model request");
+  finish(requests[0].res, [{
+    type: "message", id: "msg_bootstrap", role: "assistant",
+    content: [{ type: "output_text", text: "Ready" }],
+  }]);
+  await waitFor(() => events.some((e) =>
+    e.method === "turn/completed" && e.params.turn.id === bootstrap.turn.id), "bootstrap completion");
+  requests.length = 0;
+  events.length = 0;
+
   const idle = await sendToAppServer({ socket, threadId: thread.id, text: "Smoke test input" });
-  assert.equal(idle.method, "turn/start");
+  assert.equal(idle.delivery, "started");
   await waitFor(() => requests.length === 1, "model request");
   const busy = await sendToAppServer({ socket, threadId: thread.id, text: "Additional smoke input" });
+  assert.equal(busy.delivery, "joined");
   assert.equal(busy.turnId, idle.turnId);
-  assert.ok(["turn/steer", "turn/start"].includes(busy.method));
 
-  // Direct turn/start while active verifies the idle-to-busy race.
+  // A stale user steer is rejected, while another ExternalMessage joins the
+  // same turn without a turn ID for the sender to guess.
   race = new AppServerClient({ socket });
   await race.initialize();
   await assert.rejects(race.request("turn/steer", {
     threadId: thread.id, expectedTurnId: "stale-id", input: [{ type: "text", text: "rejected input" }],
   }), /expected active turn id/);
-  const raced = await race.request("turn/start", {
-    threadId: thread.id, input: [{ type: "text", text: "racing input" }],
-  });
-  assert.equal(raced.turn.id, idle.turnId);
+  const raced = await sendToAppServer({ socket, threadId: thread.id, text: "Racing smoke input" });
+  assert.equal(raced.delivery, "joined");
+  assert.equal(raced.turnId, idle.turnId);
   race.close();
 
   // All sending clients have disconnected. The receiving client must still
@@ -135,11 +150,25 @@ try {
   assert.equal(completed.params.turn.id, idle.turnId);
   assert.equal(completed.params.turn.status, "completed");
   assert.equal(events.filter((e) => e.method === "turn/started").length, 1);
-  const followup = JSON.stringify(requests.at(-1).parsed.input);
+  const items = requests.at(-1).parsed.input;
+  const followup = JSON.stringify(items);
   assert.ok(followup.includes("Additional smoke input"));
-  assert.ok(followup.includes("racing input"));
+  assert.ok(followup.includes("Racing smoke input"));
   assert.ok(!followup.includes("rejected input"));
-  console.log("PASS Real Codex: idle start, busy delivery, stale-turn rejection, idle-to-busy race, approval routing, and completion after sender disconnect");
+  const external = items.filter((item) =>
+    item.type === "function_call_output" &&
+    item.name === "peer_message" &&
+    item.namespace === "agent-mesh");
+  assert.deepEqual(external.map((item) => item.output),
+    ["Smoke test input", "Additional smoke input", "Racing smoke input"]);
+  for (const item of items) {
+    if (item.type !== "message" || !["user", "developer"].includes(item.role)) continue;
+    const text = JSON.stringify(item.content);
+    for (const sent of ["Smoke test input", "Additional smoke input", "Racing smoke input"]) {
+      assert.ok(!text.includes(sent), `Peer message reached the model as ${item.role} input`);
+    }
+  }
+  console.log("PASS Real Codex Python SDK: ExternalMessage tool authority, idle start, active-turn join, approval routing, and sender disconnect");
 } finally {
   race?.close();
   terminal?.close();
