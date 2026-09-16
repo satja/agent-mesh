@@ -6,7 +6,8 @@
   "description": "Project-local addressed messaging between Codex and Claude Code sessions",
   "main": "server.js",
   "scripts": {
-    "test": "node test.js",
+    "test": "node test.js && node --test live-test.mjs",
+    "test:live": "node live-smoke.mjs",
     "status": "node status.js",
     "watch": "node watch"
   },
@@ -14,6 +15,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.3"
   }
 }

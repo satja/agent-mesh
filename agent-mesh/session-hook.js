@@ -69,7 +69,7 @@ function readClaims() {
         rmSync(path, { force: true });
         continue;
       }
-      claims.push({ agent_id: agentId, launcher_pid: claim.launcher_pid });
+      claims.push({ agent_id: agentId, launcher_pid: claim.launcher_pid, app_server_socket: claim.app_server_socket });
     } catch {
       // A malformed claim must not block an otherwise healthy launch.
     }
@@ -101,19 +101,24 @@ function resolveIdentity() {
   if (envKind || envId) {
     if (envKind !== "codex") return null;
     if (!ID_PATTERN.test(envId)) throw new Error(`invalid AGENT_MESH_ID: ${envId}`);
-    return { agentId: envId, source: "env" };
+    return {
+      agentId: envId,
+      source: "env",
+      socket: process.env.AGENT_MESH_CODEX_SOCKET ||
+        readClaims().find((claim) => claim.agent_id === envId)?.app_server_socket,
+    };
   }
 
   const claims = readClaims();
   if (!claims.length) return null;
-  if (claims.length === 1) return { agentId: claims[0].agent_id, source: "launch-claim" };
+  if (claims.length === 1) return { agentId: claims[0].agent_id, source: "launch-claim", socket: claims[0].app_server_socket };
 
   // Several Codex agents are starting at once, so fall back to process ancestry
   // to find the claim written by this session's own launcher.
   const ancestors = new Set(ancestorPids());
   const matches = claims.filter((claim) => ancestors.has(claim.launcher_pid));
   if (matches.length === 1) {
-    return { agentId: matches[0].agent_id, source: "launch-claim-ancestry" };
+    return { agentId: matches[0].agent_id, source: "launch-claim-ancestry", socket: matches[0].app_server_socket };
   }
   log("warn", "ambiguous Codex launch claims; identity not resolved", {
     candidates: claims.map((claim) => claim.agent_id),
@@ -184,6 +189,7 @@ try {
         session_id: sessionId,
         cwd: projectRoot,
         identity_source: identity.source,
+        ...(identity.socket ? { app_server_socket: identity.socket } : {}),
         registered_at: new Date().toISOString(),
         ...carried,
       },

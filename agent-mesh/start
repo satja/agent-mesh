@@ -3,6 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { launchLive } from "./live-launch.mjs";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 // These are all valid IDs, but as the <agent-id> argument they almost always
@@ -26,6 +27,7 @@ if (!new Set(["codex", "claude"]).has(kind) || !ID_PATTERN.test(agentId)) {
   process.stderr.write(
     "Usage: ./agent-mesh/start <codex|claude> <agent-id> [agent options]\n" +
       "       ./agent-mesh/start <codex|claude> <agent-id> --resume [session]\n" +
+      "       ./agent-mesh/start codex <agent-id> --mesh-live [agent options]\n" +
       "Agent ID must match [a-z0-9][a-z0-9_-]{0,31}.\n" +
       "Always resume through this launcher; resuming an agent directly starts it\n" +
       "without AGENT_MESH_ID/AGENT_MESH_KIND and its MCP server will refuse to run.\n",
@@ -40,7 +42,12 @@ const command =
     : process.env.AGENT_MESH_CLAUDE_BIN || "claude";
 const rawArgs = process.argv.slice(4);
 const noBootstrap = rawArgs.includes("--mesh-no-bootstrap");
-const userArgs = rawArgs.filter((argument) => argument !== "--mesh-no-bootstrap");
+const live = rawArgs.includes("--mesh-live");
+if (live && kind !== "codex") {
+  process.stderr.write("--mesh-live is only supported for Codex.\n");
+  process.exit(2);
+}
+const userArgs = rawArgs.filter((argument) => !["--mesh-no-bootstrap", "--mesh-live"].includes(argument));
 // Everything after --resume belongs to the agent's own resume interface, so
 // `--resume` alone opens each agent's picker and `--resume <id>` targets one.
 const resumeAt = userArgs.indexOf("--resume");
@@ -171,12 +178,32 @@ if (kind === "codex") {
   );
 }
 
+if (live) {
+  let status = 1;
+  try {
+    status = await launchLive({
+      command, args, cwd: projectRoot,
+      env: { ...process.env, AGENT_MESH_ID: agentId, AGENT_MESH_KIND: kind },
+      onReady(socket) {
+        const claim = JSON.parse(readFileSync(claimPath, "utf8"));
+        writeFileSync(claimPath, JSON.stringify({ ...claim, app_server_socket: socket }) + "\n", { mode: 0o600 });
+      },
+    });
+  } catch (error) {
+    process.stderr.write(`Live mesh launch failed: ${error.message}\n`);
+  } finally {
+    if (claimPath) rmSync(claimPath, { force: true });
+  }
+  process.exit(status);
+}
+
 const result = spawnSync(command, args, {
   stdio: "inherit",
   env: {
     ...process.env,
     AGENT_MESH_ID: agentId,
     AGENT_MESH_KIND: kind,
+    AGENT_MESH_CODEX_SOCKET: "",
   },
 });
 if (claimPath) rmSync(claimPath, { force: true });

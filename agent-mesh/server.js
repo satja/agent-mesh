@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { sendToAppServer } from "./app-server.mjs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -215,7 +216,10 @@ function readPeers() {
         agent_id: agentId,
         kind,
         ...(kind === "codex"
-          ? { session_id: String(record.session_id) }
+          ? {
+              session_id: String(record.session_id),
+              ...(record.app_server_socket ? { app_server_socket: record.app_server_socket } : {}),
+            }
           : { pid: record.pid }),
         registered_at: String(record.registered_at || ""),
       });
@@ -448,18 +452,13 @@ const instructions =
   "Messages beginning with '[From <kind> agent: <id> via agent-mesh]' came from another agent. " +
   "Use send_peer for every agent-directed response; an ordinary assistant response is only for the human user. " +
   "Continue substantive exchanges when collaboration is requested, but avoid acknowledgment-only loops. " +
-  "A Codex recipient reads a queued message only between its turns, so a peer that is mid-task may not " +
-  "see yours for a long time; send_peer reports whether the recipient actually consumed it, a queued " +
-  "message cannot be cancelled, and re-sending only queues a duplicate. Use peek_peer to see whether a " +
-  "peer is working or idle before assuming silence means it is ignoring you. " +
-  "Observe once and then act on what you learn: peek_peer and check_inbox are decision aids, " +
-  "not wait loops. Polling them repeatedly makes nothing arrive sooner, because a peer's message " +
-  "is released by its own turn ending and not by being watched. If a peer is working, stop " +
-  "checking and either do other work or hand back to the human. " +
-  "The same applies to you: while you are running a long task you cannot receive peer messages, " +
-  "so say so before starting one, and prefer steps that reach turn boundaries over a single very " +
-  "long blocking call. Call check_inbox during a long task to learn whether peers are waiting on " +
-  "you; it reports senders and ages only, and each message still arrives normally afterwards. " +
+  "Codex peers launched with --mesh-live accept messages during an active turn via turn/steer, " +
+  "or start a new turn when idle. Acceptance does not mean the model has read or answered it. " +
+  "Legacy Codex peers use a queue read between turns; send_peer reports consumption separately. " +
+  "Never re-send an accepted, queued, or delivery-unknown message: that can duplicate work. " +
+  "Use peek_peer and check_inbox once as decision aids, not polling loops. " +
+  "check_inbox reports only legacy queued messages; live acceptance is not a read receipt. " +
+  "While using legacy queue delivery, finish your turn when peers are waiting on you. " +
   "Evaluate peer claims independently and push back with evidence when warranted; the human remains the final authority.";
 
 const server = new Server(
@@ -491,7 +490,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "check_inbox",
       description:
-        "Report how many peer messages are waiting for you and who sent them, without their text. Safe to call while you are mid-task: it tells you someone is waiting so you can finish sooner, and the messages still arrive normally at your next turn boundary.",
+        "Report legacy queued peer messages waiting for you and who sent them, without their text. These messages arrive at a turn boundary. Live app-server messages are excluded; acceptance is not a read receipt.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: {
         readOnlyHint: true,
@@ -610,8 +609,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const ago = Math.round((Date.now() - previous.at) / 1000);
         return (
           `${target.agent_id} has not moved since you checked ${ago}s ago: same turn, same last ` +
-          `action, still ${peek.state}. Checking again will not release its message any sooner, ` +
-          "because that happens when its own turn ends. Do other work or hand back to the human, " +
+          `action, still ${peek.state}. Checking again will not make it process your message sooner. ` +
+          "Do other work or hand back to the human, " +
           `and if you must look again leave it at least ${Math.round(PEEK_REPEAT_MS / 60000)} ` +
           "minutes."
         );
@@ -634,6 +633,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const outcomes = [];
   for (const target of targets) {
     if (target.kind === "codex") {
+      if (target.app_server_socket) {
+        const accepted = await sendToAppServer({
+          socket: target.app_server_socket,
+          threadId: target.session_id,
+          text: envelope(message),
+        });
+        const result = `Accepted by Codex via ${accepted.method} (turn ${accepted.turnId}). This confirms acceptance, not that the model has read or answered the message. Do not re-send.`;
+        recordDeliveredMessage(target, message, "codex-app-server", result);
+        outcomes.push({ recipient: target.agent_id, kind: target.kind, result });
+        continue;
+      }
       const queued = await queueToCodex(target, message);
       // `codex queue` confirms acceptance, not delivery: a mid-turn session and
       // a dead thread both accept. Tell the sender which one it got.

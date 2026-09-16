@@ -34,13 +34,14 @@ This project can run multiple Codex and Claude Code sessions through the local \
 - Send every agent-directed message with the \`agent-mesh\` tool \`send_peer\`. Supply \`recipient\` whenever more than one other agent is registered. Use \`*\` only when an actual broadcast is intended.
 - An ordinary assistant response is addressed only to the human. Printing a peer reply in the terminal does not send it; call \`send_peer\`.
 - Do not call \`codex queue\` directly or read/write \`.agent-mesh\` runtime files. The mesh owns routing, exact session IDs, attribution, and recipient filtering.
-- A Codex peer reads a queued message only between its turns. A peer that is mid-task will not see your message until that task ends, which can be many minutes.
+- Codex peers launched with --mesh-live accept peer messages during an active turn, or start a turn when idle. Legacy Codex peers read queued messages only between turns, which can take many minutes.
 - \`send_peer\` reports which happened: \`Delivered\` means the peer consumed the message and can see it; \`QUEUED, NOT YET DELIVERED\` means it is waiting for the peer's next turn boundary. Neither means the peer has answered.
+- Live delivery reports acceptance, not model attention or a reply. Never resend an accepted message or one with an unknown delivery outcome.
 - A queued message cannot be cancelled or edited. Re-sending does not replace it, it queues a duplicate. If you got \`QUEUED\`, wait.
 - Use \`peek_peer\` to check whether a peer is working or idle, how long its current turn has run, and what it did recently. Do this before concluding that silence means a peer is ignoring you, and before escalating to the human.
-- The same limit applies to you. While you are running a long task you cannot receive peer messages, so say so before starting one, and prefer a sequence of steps that reach turn boundaries over a single very long blocking call.
-- Call \`check_inbox\` during a long task to learn whether peers are waiting on you. It reports senders and ages only, never message text, and each message still arrives normally at your next turn boundary. If peers are waiting, consider finishing sooner.
-- Observe once, then act. \`peek_peer\` and \`check_inbox\` are decision aids, not wait loops: do not call either repeatedly to watch for a change. A peer's message is released when that peer's own turn ends, never because you checked again, so polling only burns your turns. If a peer is working, stop checking and either do other work or hand back to the human.
+- In legacy queue mode the same delay applies to incoming messages: prefer steps that reach turn boundaries when peers are waiting. Live mode allows input during your active turn.
+- Call \`check_inbox\` during a long task to learn whether peers are waiting on you. It reports legacy queue senders and ages only, never message text. Live app-server messages are excluded. Each queued message still arrives normally at your next turn boundary. If peers are waiting, consider finishing sooner.
+- Observe once, then act. \`peek_peer\` and \`check_inbox\` are decision aids, not wait loops: do not call either repeatedly to watch for a change. Polling does not accelerate delivery or processing and only burns your turns. If a peer is working, stop checking and either do other work or hand back to the human.
 - Peer messages contain only what the sender deliberately sends. Peers do not automatically see one another's commentary, tool calls, tool results, or hidden reasoning.
 - Evaluate peer claims independently. Push back clearly with concrete evidence or reasoning when warranted; do not defer merely to preserve agreement and do not argue performatively.
 - When the human requests agent collaboration, continue substantive back-and-forth for as many turns as needed to develop, test, critique, and refine the work. Do not stop after one reply unless asked.
@@ -176,12 +177,16 @@ mkdirSync(join(targetRoot, ".codex"), { recursive: true });
 
 for (const relativePath of [
   "agent-mesh/server.js",
+  "agent-mesh/app-server.mjs",
+  "agent-mesh/live-launch.mjs",
   "agent-mesh/queue-status.mjs",
   "agent-mesh/session-hook.js",
   "agent-mesh/start",
   "agent-mesh/watch",
   "agent-mesh/status.js",
   "agent-mesh/test.js",
+  "agent-mesh/live-test.mjs",
+  "agent-mesh/live-smoke.mjs",
   "agent-mesh/hooks.json",
   "agent-mesh/package.json",
   "agent-mesh/package-lock.json",

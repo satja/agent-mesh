@@ -187,7 +187,7 @@ export function pendingForSelf({ selfId, sessionId, ledgerPath, maxRecords = 100
       if (!line.trim()) continue;
       try {
         const record = JSON.parse(line);
-        if (record.recipient_id === selfId) addressed.push(record);
+        if (record.recipient_id === selfId && record.transport !== "codex-app-server") addressed.push(record);
       } catch {
         // A partially written ledger line is not worth failing over.
       }

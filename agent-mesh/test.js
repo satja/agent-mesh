@@ -815,7 +815,7 @@ try {
     `an immediate repeat peek was not discouraged: ${peekText(secondPeek)}`,
   );
   assert(
-    /will not release its message any sooner/.test(peekText(secondPeek)),
+    /will not make it process your message sooner/.test(peekText(secondPeek)),
     "the repeat peek did not say why polling is useless",
   );
   pass("A repeat peek that learned nothing is told so instead of encouraging a poll");

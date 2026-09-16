@@ -41,7 +41,7 @@ function health(record) {
       : { label: "unconfirmed", note: "no pid recorded" };
   }
   return processAlive(pid)
-    ? { label: "live", note: `pid ${pid}` }
+    ? { label: "live", note: `pid ${pid}${record.app_server_socket ? " (live app-server delivery)" : ""}` }
     : { label: "STALE", note: `pid ${pid} is gone` };
 }
 
