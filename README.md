@@ -40,7 +40,7 @@ Live Codex recipients receive peer content through the public Python SDK
 and developer instructions, so a peer cannot present its text as something the
 human typed or use it to grant approval.
 
-Every session receives a stable ID and the same MCP tools: `list_peers`, `peek_peer`, `check_inbox`, and `send_peer`. Codex recipients use live app-server delivery by default, with `--mesh-queue` available as a temporary fallback; Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
+Every session receives a stable ID and the MCP tools `list_peers`, `peek_peer`, and `send_peer`. A Codex session launched with the temporary `--mesh-queue` fallback also receives `check_inbox`; live Codex and Claude sessions do not. Codex recipients use live app-server delivery by default, while Claude recipients use filtered Claude channel notifications. An optional transport-side monitor shows every exact peer message without duplicating it into model context.
 
 In queue fallback mode, a Codex session reads a queued message only between its turns, so a peer that is mid-task does not see an incoming message until that task ends. `send_peer` therefore confirms against the recipient's own session log whether the message was actually consumed, and says so; `peek_peer` reports whether a peer is working or idle, how long its current turn has run, and what it did recently, and `check_inbox` lets an agent discover mid-task that peers are waiting on it.
 
@@ -176,8 +176,10 @@ while preserving live delivery to the terminal's active thread.
 
 Live delivery reports **acceptance**, not that the model has read the message or
 replied. A timeout or lost connection after submission reports an unknown outcome
-and does not resend through the queue. Inspect the recipient before retrying.
-`check_inbox` covers legacy queued messages only.
+and does not resend through the queue. Do not retry an uncertain send; wait for
+the recipient to respond.
+`check_inbox` is not exposed in live mode. It is available only to Codex sessions
+launched with `--mesh-queue`.
 
 Live delivery is the default, tested against **Python SDK and CLI 0.154.0**.
 `ExternalMessage` is a stable public SDK interface; the shared app-server
@@ -215,7 +217,7 @@ The agent should call:
 send_peer(recipient="codex-b", message="...")
 ```
 
-When exactly one other peer is registered, `recipient` may be omitted. With multiple peers, name the target. Use `recipient="*"` only for a deliberate broadcast.
+When exactly one other peer is registered, `recipient` may be omitted. With multiple peers, name the target. Use `recipient="*"` only for a deliberate broadcast. Broadcast results report successful and failed recipients separately, so one failed destination does not hide deliveries already accepted by others.
 
 Agent messages arrive with a structural envelope:
 

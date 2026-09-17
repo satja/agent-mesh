@@ -20,7 +20,7 @@ test("live delivery delegates one exact message to the Python SDK helper", async
 import { writeFileSync } from 'node:fs';
 let body='';
 process.stdin.on('data',chunk=>body+=chunk);
-process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({delivery:'joined',turnId:'turn-a'}));});
+process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({turnId:'turn-a'}));});
 `, { mode: 0o755 });
   try {
     const previous = process.env.TEST_LOG;
@@ -28,7 +28,7 @@ process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log
     try {
       assert.deepEqual(await sendToAppServer({
         socket: "/tmp/codex.sock", threadId: "thread-a", text: "hello", python: helper,
-      }), { delivery: "joined", turnId: "turn-a" });
+      }), { turnId: "turn-a" });
     } finally {
       if (previous === undefined) delete process.env.TEST_LOG;
       else process.env.TEST_LOG = previous;
@@ -49,6 +49,19 @@ test("helper failures are never retried or silently queued", async () => {
     await assert.rejects(sendToAppServer({
       socket: "/tmp/codex.sock", threadId: "thread-a", text: "hello", python: helper,
     }), /outcome unknown.*Do not re-send/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("malformed helper success is reported as an uncertain delivery", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mesh-sdk-malformed-"));
+  const helper = join(directory, "python");
+  writeFileSync(helper, "#!/bin/sh\necho '{\"unexpected\":true}'\n", { mode: 0o755 });
+  try {
+    await assert.rejects(sendToAppServer({
+      socket: "/tmp/codex.sock", threadId: "thread-a", text: "hello", python: helper,
+    }), /outcome unknown.*Do not re-send/i);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -185,7 +198,7 @@ test("Claude send_peer selects live Codex delivery and records the message once"
   writeFileSync(helper, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 let body='';process.stdin.on('data',chunk=>body+=chunk);
-process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({delivery:'started',turnId:'turn-new'}));});
+process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log(JSON.stringify({turnId:'turn-new'}));});
 `, { mode: 0o755 });
   const client = new Client({ name: "mesh-test", version: "1" });
   const transport = new StdioClientTransport({
@@ -202,6 +215,8 @@ process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log
   });
   try {
     await client.connect(transport);
+    const tools = await client.listTools();
+    assert.equal(tools.tools.some((tool) => tool.name === "check_inbox"), false);
     const result = await client.callTool({ name: "send_peer", arguments: { recipient: "codex-live", message: "live hello" } });
     assert.match(result.content[0].text, /Python SDK ExternalMessage API/);
     assert.deepEqual(JSON.parse(readFileSync(helperLog, "utf8")), {
@@ -213,6 +228,50 @@ process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].transport, "codex-app-server");
     assert.equal(ledger[0].message, "live hello");
+  } finally {
+    await client.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("broadcast reports each live recipient when one delivery fails", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mesh-live-broadcast-"));
+  const helper = join(directory, "python");
+  const sessions = join(directory, ".agent-mesh/sessions");
+  mkdirSync(sessions, { recursive: true });
+  for (const [agentId, threadId] of [["a-codex-ok", "thread-ok"], ["z-codex-fail", "thread-fail"]]) {
+    writeFileSync(join(sessions, `${agentId}.json`), JSON.stringify({
+      agent_id: agentId, kind: "codex", session_id: threadId, cwd: directory,
+      mcp_pid: process.pid, app_server_socket: join(directory, `${agentId}.sock`),
+    }));
+  }
+  writeFileSync(helper, `#!/usr/bin/env node
+let body='';process.stdin.on('data',chunk=>body+=chunk);
+process.stdin.on('end',()=>{const request=JSON.parse(body);if(request.threadId==='thread-fail'){console.error('failed to submit turn input: synthetic rejection');process.exit(1);}console.log(JSON.stringify({turnId:'turn-ok'}));});
+`, { mode: 0o755 });
+  const client = new Client({ name: "mesh-broadcast-test", version: "1" });
+  const transport = new StdioClientTransport({
+    command: process.execPath, args: [fileURLToPath(new URL("server.js", import.meta.url))], cwd: directory,
+    env: {
+      ...process.env,
+      AGENT_MESH_CWD: directory,
+      AGENT_MESH_ID: "claude-source",
+      AGENT_MESH_KIND: "claude",
+      AGENT_MESH_PYTHON_BIN: helper,
+    },
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "send_peer", arguments: { recipient: "*", message: "broadcast hello" },
+    });
+    const report = JSON.parse(result.content[0].text);
+    assert.deepEqual(report.delivered.map((item) => item.recipient), ["a-codex-ok"]);
+    assert.deepEqual(report.failed.map((item) => item.recipient), ["z-codex-fail"]);
+    assert.match(report.failed[0].error, /synthetic rejection/);
+    const ledger = readFileSync(join(directory, ".agent-mesh/messages.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(ledger.map((item) => item.recipient_id), ["a-codex-ok"]);
   } finally {
     await client.close();
     rmSync(directory, { recursive: true, force: true });

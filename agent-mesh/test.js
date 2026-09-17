@@ -288,10 +288,24 @@ try {
     ["list_peers", "send_peer", "peek_peer", "check_inbox"].every((tool) => names.includes(tool)),
     `missing tools: ${names.join(", ")}`,
   );
+  const claudeTools = await claudeB.request("tools/list", {});
+  assert(
+    !claudeTools.tools.some((tool) => tool.name === "check_inbox"),
+    "Claude should not expose the queue-only check_inbox tool",
+  );
+  const liveCodex = new McpProcess("codex-live-tools", "codex", {
+    AGENT_MESH_CODEX_SOCKET: "/tmp/agent-mesh-live-test.sock",
+  });
+  await liveCodex.initialize();
+  const liveCodexTools = await liveCodex.request("tools/list", {});
+  assert(
+    !liveCodexTools.tools.some((tool) => tool.name === "check_inbox"),
+    "live Codex should not expose the queue-only check_inbox tool",
+  );
   const listed = await codexA.call("list_peers", {});
   const peerData = JSON.parse(listed.content[0].text);
   assert(peerData.peers.some((peer) => peer.agent_id === "claude-b"), "Claude peer missing");
-  pass("Shared MCP discovery for Codex and Claude peers");
+  pass("MCP discovery exposes check_inbox only to queue-mode Codex sessions");
 
   const sourceResult = await codexA.call("send_peer", {
     recipient: "codex-b",
@@ -726,6 +740,12 @@ try {
   const installerPath = join(here, "..", "install-agent-mesh.mjs");
   if (existsSync(installerPath)) {
     const installerSource = readFileSync(installerPath, "utf8");
+    assert(
+      installerSource.includes(
+        'env_vars = ["AGENT_MESH_ID", "AGENT_MESH_KIND", "AGENT_MESH_CODEX_SOCKET"]',
+      ),
+      "installed Codex MCP config does not forward the live-delivery socket",
+    );
     const bundled = new Set(
       [...installerSource.matchAll(/"(agent-mesh\/[^"]+)"/g)].map((match) => match[1]),
     );

@@ -109,10 +109,8 @@ try {
   events.length = 0;
 
   const idle = await sendToAppServer({ socket, threadId: thread.id, text: "Smoke test input" });
-  assert.equal(idle.delivery, "started");
   await waitFor(() => requests.length === 1, "model request");
   const busy = await sendToAppServer({ socket, threadId: thread.id, text: "Additional smoke input" });
-  assert.equal(busy.delivery, "joined");
   assert.equal(busy.turnId, idle.turnId);
 
   // A stale user steer is rejected, while another ExternalMessage joins the
@@ -123,7 +121,6 @@ try {
     threadId: thread.id, expectedTurnId: "stale-id", input: [{ type: "text", text: "rejected input" }],
   }), /expected active turn id/);
   const raced = await sendToAppServer({ socket, threadId: thread.id, text: "Racing smoke input" });
-  assert.equal(raced.delivery, "joined");
   assert.equal(raced.turnId, idle.turnId);
   race.close();
 

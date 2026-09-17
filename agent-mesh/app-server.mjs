@@ -121,7 +121,7 @@ export function sendToAppServer({ socket, threadId, text, python = pythonExecuta
       finish(() => reject(new Error(
         "Delivery outcome unknown after ExternalMessage timed out" +
         (stderr.trim() ? `: ${stderr.trim()}` : "") +
-        ". Do not re-send or queue a duplicate; inspect the recipient first.",
+        ". Do not re-send or queue a duplicate; wait for the recipient to respond.",
       )));
     }, 20000);
     child.stdout.on("data", (chunk) => { stdout = (stdout + chunk).slice(-10000); });
@@ -135,19 +135,22 @@ export function sendToAppServer({ socket, threadId, text, python = pythonExecuta
         } else {
           reject(new Error(
             `Delivery outcome unknown after ExternalMessage: ${detail}. ` +
-            "Do not re-send or queue a duplicate; inspect the recipient first.",
+            "Do not re-send or queue a duplicate; wait for the recipient to respond.",
           ));
         }
         return;
       }
       try {
         const result = JSON.parse(stdout.trim());
-        if (!result.turnId || !["joined", "started"].includes(result.delivery)) {
+        if (typeof result.turnId !== "string" || !result.turnId.trim()) {
           throw new Error("invalid result shape");
         }
         resolve(result);
       } catch (error) {
-        reject(new Error(`ExternalMessage helper returned invalid output: ${error.message}`));
+        reject(new Error(
+          `Delivery outcome unknown because the ExternalMessage helper returned invalid output: ${error.message}. ` +
+          "Do not re-send or queue a duplicate; wait for the recipient to respond.",
+        ));
       }
     }));
     child.stdin.end(JSON.stringify({ socket, threadId, content: text }));

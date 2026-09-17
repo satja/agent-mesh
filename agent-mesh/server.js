@@ -447,6 +447,8 @@ function envelopeFromRecord(record, message) {
   return `[From ${record.sender_kind} agent: ${record.sender_id} via agent-mesh]\n\n${message}`;
 }
 
+const queueMode = selfKind === "codex" && !String(process.env.AGENT_MESH_CODEX_SOCKET || "").trim();
+
 const instructions =
   `Your mesh identity is '${selfId}' (${selfKind}). ` +
   "Messages beginning with '[From <kind> agent: <id> via agent-mesh]' came from another agent. " +
@@ -457,9 +459,10 @@ const instructions =
   "Acceptance does not mean the model has read or answered it. " +
   "Legacy Codex peers use a queue read between turns; send_peer reports consumption separately. " +
   "Never re-send an accepted, queued, or delivery-unknown message: that can duplicate work. " +
-  "Use peek_peer and check_inbox once as decision aids, not polling loops. " +
-  "check_inbox reports only legacy queued messages; live acceptance is not a read receipt. " +
-  "While using legacy queue delivery, finish your turn when peers are waiting on you. " +
+  "Use peek_peer once as a decision aid, not a polling loop. " +
+  (queueMode
+    ? "This session uses legacy queue delivery. check_inbox is available; use it once during long work, and finish your turn when peers are waiting on you. "
+    : "Live acceptance is not a read receipt. ") +
   "Evaluate peer claims independently and push back with evidence when warranted; the human remains the final authority.";
 
 const server = new Server(
@@ -488,10 +491,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         openWorldHint: false,
       },
     },
-    {
+    ...(queueMode ? [{
       name: "check_inbox",
       description:
-        "Report legacy queued peer messages waiting for you and who sent them, without their text. These messages arrive at a turn boundary. Live app-server messages are excluded; acceptance is not a read receipt.",
+        "Report queued peer messages waiting for this queue-mode Codex session and who sent them, without their text. These messages arrive at a turn boundary.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       annotations: {
         readOnlyHint: true,
@@ -499,7 +502,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         idempotentHint: true,
         openWorldHint: false,
       },
-    },
+    }] : []),
     {
       name: "peek_peer",
       description:
@@ -566,6 +569,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
   if (request.params.name === "check_inbox") {
+    if (!queueMode) {
+      throw new Error("check_inbox is available only to Codex sessions launched with --mesh-queue");
+    }
     let ownSessionId = null;
     try {
       ownSessionId = JSON.parse(
@@ -632,54 +638,55 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   const targets = resolveTargets(recipient);
   const outcomes = [];
+  const failures = [];
   for (const target of targets) {
-    if (target.kind === "codex") {
-      if (target.app_server_socket) {
-        const accepted = await sendToAppServer({
-          socket: target.app_server_socket,
-          threadId: target.session_id,
-          text: envelope(message),
+    try {
+      if (target.kind === "codex") {
+        if (target.app_server_socket) {
+          const accepted = await sendToAppServer({
+            socket: target.app_server_socket,
+            threadId: target.session_id,
+            text: envelope(message),
+          });
+          const result = `Accepted by Codex through the Python SDK ExternalMessage API on turn ${accepted.turnId} with tool-level authority. This confirms acceptance, not whether it joined or started a turn, nor that the model has read or answered the message. Do not re-send.`;
+          recordDeliveredMessage(target, message, "codex-app-server", result);
+          outcomes.push({ recipient: target.agent_id, kind: target.kind, result });
+          continue;
+        }
+        const queued = await queueToCodex(target, message);
+        // `codex queue` confirms acceptance, not delivery: a mid-turn session and
+        // a dead thread both accept. Tell the sender which one it got.
+        const status = await confirmConsumption({
+          sessionId: target.session_id,
+          message: envelope(message),
         });
-        const placement = accepted.delivery === "joined"
-          ? `joined ${target.agent_id}'s active turn`
-          : `started a new turn for ${target.agent_id}`;
-        const result = `Accepted by Codex through the Python SDK ExternalMessage API; it ${placement} (turn ${accepted.turnId}) with tool-level authority. This confirms acceptance, not that the model has read or answered the message. Do not re-send.`;
-        recordDeliveredMessage(target, message, "codex-app-server", result);
+        const result = `${queued}\n${describeDelivery(status, target.agent_id)}`;
+        log("info", "codex delivery status", {
+          recipient: target.agent_id,
+          state: status.state,
+          waited_ms: status.waited_ms ?? null,
+        });
+        recordDeliveredMessage(target, message, "codex-queue", result);
         outcomes.push({ recipient: target.agent_id, kind: target.kind, result });
-        continue;
+      } else {
+        const result = `mailbox:${sendToClaude(target, message)}`;
+        recordDeliveredMessage(target, message, "claude-channel", result);
+        outcomes.push({ recipient: target.agent_id, kind: target.kind, result });
       }
-      const queued = await queueToCodex(target, message);
-      // `codex queue` confirms acceptance, not delivery: a mid-turn session and
-      // a dead thread both accept. Tell the sender which one it got.
-      const status = await confirmConsumption({
-        sessionId: target.session_id,
-        message: envelope(message),
-      });
-      const result = `${queued}\n${describeDelivery(status, target.agent_id)}`;
-      log("info", "codex delivery status", {
-        recipient: target.agent_id,
-        state: status.state,
-        waited_ms: status.waited_ms ?? null,
-      });
-      recordDeliveredMessage(target, message, "codex-queue", result);
-      outcomes.push({
+    } catch (error) {
+      if (targets.length === 1) throw error;
+      failures.push({
         recipient: target.agent_id,
         kind: target.kind,
-        result,
-      });
-    } else {
-      const result = `mailbox:${sendToClaude(target, message)}`;
-      recordDeliveredMessage(target, message, "claude-channel", result);
-      outcomes.push({
-        recipient: target.agent_id,
-        kind: target.kind,
-        result,
+        error: String(error?.message || error),
       });
     }
   }
+  const report = { delivered: outcomes };
+  if (failures.length) report.failed = failures;
   return {
     content: [
-      { type: "text", text: JSON.stringify({ delivered: outcomes }, null, 2) },
+      { type: "text", text: JSON.stringify(report, null, 2) },
     ],
   };
 });

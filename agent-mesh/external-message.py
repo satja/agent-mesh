@@ -84,7 +84,6 @@ def main() -> None:
         print(
             json.dumps(
                 {
-                    "delivery": "joined" if state == "active" else "started",
                     "turnId": handle.id,
                 }
             ),
