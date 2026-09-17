@@ -424,10 +424,27 @@ try {
   const claimed = registerCodexWithoutEnv("session-claimed");
   assert(claimed.status === 0, claimed.stderr || "claim-based registration failed");
   assert(
-    sessionRecord("codex-claimed").identity_source === "launch-claim",
+    sessionRecord("codex-claimed").identity_source === "launch-claim-ancestry",
     "registration did not fall back to the launcher claim",
   );
   pass("Codex registers from a launch claim with no inherited environment");
+
+  // A living sibling process is not this hook's launcher, even when its claim
+  // is the only one in the project.
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    writeFileSync(join(launchDir, "codex-claimed.json"), JSON.stringify({
+      agent_id: "codex-claimed", kind: "codex", launcher_pid: unrelated.pid,
+      created_at: new Date().toISOString(),
+    }));
+    const ignored = registerCodexWithoutEnv("unrelated-session");
+    assert(ignored.status === 0, ignored.stderr);
+    assert(sessionRecord("codex-claimed").session_id === "session-claimed",
+      "an unrelated session overwrote the mesh registration");
+    pass("An unrelated session cannot adopt the only live launch claim");
+  } finally {
+    unrelated.kill();
+  }
 
   rmSync(launchDir, { recursive: true, force: true });
   const beforeBail = readFileSync(join(project, ".agent-mesh", "agent-mesh.log"), "utf8").length;

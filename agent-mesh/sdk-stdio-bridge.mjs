@@ -21,7 +21,13 @@ ws.on("open", () => {
   opened = true;
   for (const line of pending.splice(0)) ws.send(line);
 });
-ws.on("message", (data) => process.stdout.write(`${data.toString()}\n`));
+ws.on("message", (data) => {
+  // This connection only submits peer messages. The SDK's default request
+  // handler accepts approvals, so leave all server requests to the terminal.
+  const message = JSON.parse(data.toString());
+  if (message.method && Object.hasOwn(message, "id")) return;
+  process.stdout.write(`${data.toString()}\n`);
+});
 ws.on("error", (error) => {
   process.stderr.write(`Codex WebSocket bridge failed: ${error.message}\n`);
   process.exitCode = 1;

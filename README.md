@@ -96,8 +96,9 @@ Every Codex launcher invocation supplies a short bootstrap prompt automatically.
 The hook normally inherits `AGENT_MESH_ID`/`AGENT_MESH_KIND` from the launcher,
 but it gets neither when it runs before you have trusted it, or when the session
 was started outside the launcher. The launcher therefore also writes a claim
-under `.agent-mesh/launch/` that the hook falls back to, so registration does not
-depend on the environment. Launching Codex directly leaves no claim; register
+under `.agent-mesh/launch/` that the hook falls back to after verifying launcher
+process ancestry on Linux or macOS. An unrelated session cannot adopt that claim.
+Launching Codex directly leaves no claim; register
 that session by relaunching through the launcher.
 
 A registration carries an `mcp_pid` stamped by that session's MCP server, which
@@ -174,6 +175,12 @@ stdio connection to the same private app-server WebSocket used by the visible
 terminal. This keeps the public Python API as the source of the message shape
 while preserving live delivery to the terminal's active thread.
 
+The SDK bridge filters server requests, including command and file approvals,
+so the sending helper cannot answer approvals intended for the human's terminal.
+Broadcasts submit to recipients concurrently and report each outcome separately.
+Failure to write the local message ledger does not change an accepted delivery
+into a failed send; the diagnostic log records the ledger error.
+
 Live delivery reports **acceptance**, not that the model has read the message or
 replied. A timeout or lost connection after submission reports an unknown outcome
 and does not resend through the queue. Do not retry an uncertain send; wait for
@@ -225,7 +232,7 @@ Agent messages arrive with a structural envelope:
 [From claude agent: claude-a via agent-mesh]
 ```
 
-The receiving agent answers the human normally and answers another agent through `send_peer`. This separation means a Codex final response no longer needs a marker, and Claude does not need UI keystrokes or `@name` routing.
+The receiving agent answers the human normally and answers registered mesh peers through `send_peer`. Native subagents use their native collaboration tools and normal completion replies. This separation means a Codex final response no longer needs a marker, and Claude does not need UI keystrokes or `@name` routing.
 
 ## Queue fallback delivery waits for a turn boundary
 

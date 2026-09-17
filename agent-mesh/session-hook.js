@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 // A launch claim must survive repeated SessionStart events (startup, resume,
@@ -87,7 +88,11 @@ function ancestorPids() {
       const match = readFileSync(`/proc/${pid}/status`, "utf8").match(/^PPid:\s*(\d+)$/m);
       if (match) parent = Number(match[1]);
     } catch {
-      break;
+      // macOS has no /proc. ps also covers other Unix hosts.
+      const result = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+        encoding: "utf8", timeout: 1000,
+      });
+      if (result.status === 0) parent = Number(result.stdout.trim());
     }
     if (!Number.isInteger(parent) || parent === pid) break;
     pid = parent;
@@ -111,10 +116,8 @@ function resolveIdentity() {
 
   const claims = readClaims();
   if (!claims.length) return null;
-  if (claims.length === 1) return { agentId: claims[0].agent_id, source: "launch-claim", socket: claims[0].app_server_socket };
-
-  // Several Codex agents are starting at once, so fall back to process ancestry
-  // to find the claim written by this session's own launcher.
+  // Even a single claim must belong to this process tree: ordinary Codex
+  // sessions in the same project must not overwrite another agent's identity.
   const ancestors = new Set(ancestorPids());
   const matches = claims.filter((claim) => ancestors.has(claim.launcher_pid));
   if (matches.length === 1) {

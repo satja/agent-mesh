@@ -69,6 +69,46 @@ test("malformed helper success is reported as an uncertain delivery", async () =
 
 const snapshot = (state) => ({ thread: { status: { type: state } } });
 
+test("SDK bridge excludes approvals while connected but forwards responses and notifications", { timeout: 5000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mesh-bridge-approval-"));
+  const socket = join(directory, "control.sock");
+  const http = createServer();
+  const ws = new WebSocketServer({ server: http });
+  ws.on("connection", (peer) => peer.on("message", () => {
+    for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]) {
+      peer.send(JSON.stringify({ id: method, method, params: {} }));
+    }
+    peer.send(JSON.stringify({ method: "turn/started", params: {} }));
+    peer.send(JSON.stringify({ id: 1, result: { ready: true } }));
+  }));
+  await new Promise((resolve) => http.listen(socket, resolve));
+  const bridge = spawn(process.execPath, [fileURLToPath(new URL("sdk-stdio-bridge.mjs", import.meta.url)), socket], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  try {
+    const output = await new Promise((resolve, reject) => {
+      let body = "";
+      bridge.once("error", reject);
+      bridge.once("exit", (code) => reject(new Error(`Bridge exited early: ${code}`)));
+      bridge.stdout.on("data", (chunk) => {
+        body += chunk;
+        if (body.includes('"ready":true')) resolve(body);
+      });
+      bridge.stdin.write(JSON.stringify({ id: 1, method: "initialize", params: {} }) + "\n");
+    });
+    assert.deepEqual(output.trim().split("\n").map(JSON.parse), [
+      { method: "turn/started", params: {} },
+      { id: 1, result: { ready: true } },
+    ]);
+  } finally {
+    bridge.kill();
+    for (const peer of ws.clients) peer.terminate();
+    await new Promise((resolve) => ws.close(resolve));
+    await new Promise((resolve) => http.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("live launcher forwards backend configuration and rejects unsupported launch modes", () => {
   assert.deepEqual(serverOptions(["--no-alt-screen", "-c", "model=\"test\"", "--enable=hooks", "--strict-config", "--model", "test"]),
     ["-c", "model=\"test\"", "--enable=hooks", "--strict-config"]);
@@ -228,13 +268,18 @@ process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log
     assert.equal(ledger.length, 1);
     assert.equal(ledger[0].transport, "codex-app-server");
     assert.equal(ledger[0].message, "live hello");
+    rmSync(join(directory, ".agent-mesh/messages.jsonl"));
+    mkdirSync(join(directory, ".agent-mesh/messages.jsonl"));
+    const unlogged = await client.callTool({ name: "send_peer", arguments: { recipient: "codex-live", message: "ledger failure hello" } });
+    assert.equal(unlogged.isError, undefined);
+    assert.match(unlogged.content[0].text, /Accepted by Codex/);
   } finally {
     await client.close();
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("broadcast reports each live recipient when one delivery fails", async () => {
+test("broadcast sends concurrently and reports each recipient when one fails", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mesh-live-broadcast-"));
   const helper = join(directory, "python");
   const sessions = join(directory, ".agent-mesh/sessions");
@@ -246,8 +291,19 @@ test("broadcast reports each live recipient when one delivery fails", async () =
     }));
   }
   writeFileSync(helper, `#!/usr/bin/env node
+import { writeFileSync, existsSync } from 'node:fs';
 let body='';process.stdin.on('data',chunk=>body+=chunk);
-process.stdin.on('end',()=>{const request=JSON.parse(body);if(request.threadId==='thread-fail'){console.error('failed to submit turn input: synthetic rejection');process.exit(1);}console.log(JSON.stringify({turnId:'turn-ok'}));});
+process.stdin.on('end',()=>{
+ const request=JSON.parse(body);
+ const directory=${JSON.stringify(directory)};
+ writeFileSync(directory+'/'+request.threadId, 'ready');
+ const timer=setInterval(()=>{
+  if(!existsSync(directory+'/thread-ok')||!existsSync(directory+'/thread-fail'))return;
+  clearInterval(timer);
+  if(request.threadId==='thread-fail'){console.error('failed to submit turn input: synthetic rejection');process.exit(1);}
+  console.log(JSON.stringify({turnId:'turn-ok'}));
+ },10);
+});
 `, { mode: 0o755 });
   const client = new Client({ name: "mesh-broadcast-test", version: "1" });
   const transport = new StdioClientTransport({

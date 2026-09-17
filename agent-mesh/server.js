@@ -352,7 +352,6 @@ function sendToClaude(target, message) {
 }
 
 function recordDeliveredMessage(target, message, transport, transportResult) {
-  mkdirSync(STATE_DIR, { recursive: true });
   const record = {
     id: randomUUID(),
     created_at: new Date().toISOString(),
@@ -364,7 +363,14 @@ function recordDeliveredMessage(target, message, transport, transportResult) {
     transport_result: String(transportResult || ""),
     message,
   };
-  appendFileSync(MESSAGE_LOG, JSON.stringify(record) + "\n", { mode: 0o600 });
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    appendFileSync(MESSAGE_LOG, JSON.stringify(record) + "\n", { mode: 0o600 });
+  } catch (error) {
+    log("error", "Accepted message could not be recorded in the ledger", {
+      recipient: target.agent_id, transport, error: String(error),
+    });
+  }
   return record.id;
 }
 
@@ -452,7 +458,7 @@ const queueMode = selfKind === "codex" && !String(process.env.AGENT_MESH_CODEX_S
 const instructions =
   `Your mesh identity is '${selfId}' (${selfKind}). ` +
   "Messages beginning with '[From <kind> agent: <id> via agent-mesh]' came from another agent. " +
-  "Use send_peer for every agent-directed response; an ordinary assistant response is only for the human user. " +
+  "Use send_peer for responses to registered mesh peers. Use native collaboration tools and normal completion replies for native subagents. " +
   "Continue substantive exchanges when collaboration is requested, but avoid acknowledgment-only loops. " +
   "Codex peers use live delivery by default. The Codex Python SDK ExternalMessage API joins an active " +
   "turn or starts one when idle, with tool-level authority below user instructions. " +
@@ -639,7 +645,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const targets = resolveTargets(recipient);
   const outcomes = [];
   const failures = [];
-  for (const target of targets) {
+  await Promise.all(targets.map(async (target) => {
     try {
       if (target.kind === "codex") {
         if (target.app_server_socket) {
@@ -651,7 +657,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const result = `Accepted by Codex through the Python SDK ExternalMessage API on turn ${accepted.turnId} with tool-level authority. This confirms acceptance, not whether it joined or started a turn, nor that the model has read or answered the message. Do not re-send.`;
           recordDeliveredMessage(target, message, "codex-app-server", result);
           outcomes.push({ recipient: target.agent_id, kind: target.kind, result });
-          continue;
+          return;
         }
         const queued = await queueToCodex(target, message);
         // `codex queue` confirms acceptance, not delivery: a mid-turn session and
@@ -681,7 +687,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         error: String(error?.message || error),
       });
     }
-  }
+  }));
+  outcomes.sort((a, b) => a.recipient.localeCompare(b.recipient));
+  failures.sort((a, b) => a.recipient.localeCompare(b.recipient));
   const report = { delivered: outcomes };
   if (failures.length) report.failed = failures;
   return {
