@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { sendToAppServer } from "./app-server.mjs";
+import { processAlive, registrationHealth } from "./status.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -170,7 +171,10 @@ function registerSelf() {
   try {
     const record = JSON.parse(readFileSync(target, "utf8"));
     if (record.agent_id !== selfId || record.kind !== "codex") return;
-    if (record.mcp_pid !== process.pid) {
+    const socket = process.env.AGENT_MESH_CODEX_SOCKET || "";
+    const sameBackend = (record.app_server_socket || "") === socket;
+    const ownerAlive = socket && processAlive(record.mcp_pid);
+    if (sameBackend && record.mcp_pid !== process.pid && !ownerAlive) {
       writeRegistration({
         ...record,
         mcp_pid: process.pid,
@@ -189,7 +193,7 @@ function registerSelf() {
   }
 }
 
-function readPeers() {
+async function readPeers() {
   if (!existsSync(SESSION_DIR)) return [];
   const peers = [];
   for (const filename of readdirSync(SESSION_DIR)) {
@@ -203,15 +207,7 @@ function readPeers() {
       if (kind === "claude" && !Number.isInteger(record.pid)) continue;
       // A Codex record predating mcp_pid stamping stays trusted; one whose
       // server has exited is stale and must not absorb messages.
-      const livenessPid = kind === "claude" ? record.pid : record.mcp_pid;
-      if (Number.isInteger(livenessPid)) {
-        try {
-          process.kill(livenessPid, 0);
-        } catch (error) {
-          if (error?.code === "ESRCH") continue;
-          if (error?.code !== "EPERM") throw error;
-        }
-      }
+      if ((await registrationHealth(record)).label === "STALE") continue;
       peers.push({
         agent_id: agentId,
         kind,
@@ -230,12 +226,12 @@ function readPeers() {
   return peers.sort((a, b) => a.agent_id.localeCompare(b.agent_id));
 }
 
-function otherPeers() {
-  return readPeers().filter((peer) => peer.agent_id !== selfId);
+async function otherPeers() {
+  return (await readPeers()).filter((peer) => peer.agent_id !== selfId);
 }
 
-function resolveTargets(requested) {
-  const peers = otherPeers();
+async function resolveTargets(requested) {
+  const peers = await otherPeers();
   const raw = String(requested ?? "").trim();
   if (raw === "*") {
     if (!peers.length) throw new Error("No other mesh agents are registered yet.");
@@ -566,7 +562,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         {
           type: "text",
           text: JSON.stringify(
-            { self: { agent_id: selfId, kind: selfKind }, peers: otherPeers() },
+            { self: { agent_id: selfId, kind: selfKind }, peers: await otherPeers() },
             null,
             2,
           ),
@@ -595,7 +591,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (request.params.name === "peek_peer") {
     const { agent_id: requested } = request.params.arguments ?? {};
-    const targets = resolveTargets(requested);
+    const targets = await resolveTargets(requested);
     const reports = targets.map((target) => {
       if (target.kind !== "codex") {
         return `${target.agent_id}: not observable (only Codex sessions write an inspectable rollout).`;
@@ -642,7 +638,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (message.length > MAX_MESSAGE) {
     throw new Error(`message exceeds ${MAX_MESSAGE} characters`);
   }
-  const targets = resolveTargets(recipient);
+  const targets = await resolveTargets(recipient);
   const outcomes = [];
   const failures = [];
   await Promise.all(targets.map(async (target) => {

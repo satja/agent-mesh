@@ -91,7 +91,7 @@ function launchArgs(agentKind, agentId, extraArgs, bin) {
   return JSON.parse(readFileSync(launchLog, "utf8")).args;
 }
 
-function registerCodex(agentId, sessionId) {
+function registerCodex(agentId, sessionId, extraEnv = {}) {
   openThread(sessionId);
   const result = spawnSync(process.execPath, [hook], {
     input: JSON.stringify({
@@ -104,6 +104,7 @@ function registerCodex(agentId, sessionId) {
       ...process.env,
       AGENT_MESH_ID: agentId,
       AGENT_MESH_KIND: "codex",
+      ...extraEnv,
     },
   });
   if (result.status !== 0) throw new Error(result.stderr || "registration hook failed");
@@ -306,6 +307,24 @@ try {
   const peerData = JSON.parse(listed.content[0].text);
   assert(peerData.peers.some((peer) => peer.agent_id === "claude-b"), "Claude peer missing");
   pass("MCP discovery exposes check_inbox only to queue-mode Codex sessions");
+
+  // A side chat can open another MCP client on the main chat's live backend.
+  // Closing it must not remove the main chat from another agent's address book.
+  const sharedId = "codex-sidechat-test";
+  const socketEnv = { AGENT_MESH_CODEX_SOCKET: join(project, "main.sock") };
+  registerCodex(sharedId, "main-thread", socketEnv);
+  const owner = new McpProcess(sharedId, "codex", socketEnv);
+  await owner.initialize();
+  await waitFor(() => sessionRecord(sharedId).mcp_pid === owner.child.pid);
+  const side = new McpProcess(sharedId, "codex", socketEnv);
+  await side.initialize();
+  const sideExited = new Promise(resolve => side.child.once("exit", resolve));
+  side.child.stdin.end();
+  await sideExited;
+  const afterSide = JSON.parse((await claudeA.call("list_peers", {})).content[0].text);
+  assert(afterSide.peers.some(peer => peer.agent_id === sharedId && peer.session_id === "main-thread"),
+    "closing a second live MCP client hid the main thread from Claude");
+  pass("Closing a side chat's MCP client preserves the main thread's route");
 
   const sourceResult = await codexA.call("send_peer", {
     recipient: "codex-b",

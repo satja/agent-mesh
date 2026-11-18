@@ -230,10 +230,14 @@ test("Claude send_peer selects live Codex delivery and records the message once"
   const helper = join(directory, "python");
   const helperLog = join(directory, "external-message.json");
   const sessions = join(directory, ".agent-mesh/sessions");
+  // Legacy registrations can point at a side chat's already-exited MCP PID.
+  const exited = spawnSync(process.execPath, ["-e", ""]);
+  const backend = createServer();
+  await new Promise((resolve, reject) => backend.once("error", reject).listen(socket, resolve));
   mkdirSync(sessions, { recursive: true });
   writeFileSync(join(sessions, "codex-live.json"), JSON.stringify({
     agent_id: "codex-live", kind: "codex", session_id: "thread-a", cwd: directory,
-    mcp_pid: process.pid, app_server_socket: socket,
+    mcp_pid: exited.pid, app_server_socket: socket,
   }));
   writeFileSync(helper, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
@@ -273,8 +277,12 @@ process.stdin.on('end',()=>{writeFileSync(process.env.TEST_LOG,body);console.log
     const unlogged = await client.callTool({ name: "send_peer", arguments: { recipient: "codex-live", message: "ledger failure hello" } });
     assert.equal(unlogged.isError, undefined);
     assert.match(unlogged.content[0].text, /Accepted by Codex/);
+    await new Promise(resolve => backend.close(resolve));
+    const peers = await client.callTool({ name: "list_peers", arguments: {} });
+    assert.equal(JSON.parse(peers.content[0].text).peers.some(p => p.agent_id === "codex-live"), false);
   } finally {
     await client.close();
+    if (backend.listening) await new Promise(resolve => backend.close(resolve));
     rmSync(directory, { recursive: true, force: true });
   }
 });
